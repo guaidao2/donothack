@@ -505,7 +505,7 @@ export function meter(spec) {
           viewBox: '0 0 100 6',
           preserveAspectRatio: 'none',
           role: 'img',
-          'aria-label': spec.label || fmtInt(value),
+          'aria-label': spec.ariaLabel || spec.label || fmtInt(value),
         },
       },
       svgEl('rect', { attrs: { class: 'meter__track-rect', x: 0, y: 0, width: '100%', height: 6, rx: 3 } }),
@@ -520,9 +520,11 @@ export function meter(spec) {
         },
       })
     ),
+    // 可视标签可以留空（调用方自己在上面排了「说明 + 数值」一行时），
+    // 但 aria-label 始终保留，读屏不依赖这行文字。
     el('div', {
       class: 'meter__label',
-      text: spec.label || (max ? fmtInt(value) + ' / ' + fmtInt(max) : fmtInt(value)),
+      text: spec.label || '',
     })
   );
 }

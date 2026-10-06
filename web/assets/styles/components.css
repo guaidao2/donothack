@@ -10,9 +10,9 @@
   align-items: center;
   gap: 4px;
   font-size: var(--fs-xs);
-  font-weight: 600;
-  line-height: 1.6;
-  padding: 0 6px;
+  font-weight: 640;
+  line-height: 1.7;
+  padding: 0 8px;
   border-radius: 999px;
   border: 1px solid transparent;
   white-space: nowrap;
@@ -28,26 +28,31 @@
 .badge--ok {
   background: var(--ok-soft);
   color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 28%, transparent);
 }
 
 .badge--warn {
   background: var(--warn-soft);
   color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 28%, transparent);
 }
 
 .badge--danger {
   background: var(--danger-soft);
   color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 28%, transparent);
 }
 
 .badge--info {
   background: var(--info-soft);
   color: var(--info);
+  border-color: color-mix(in srgb, var(--info) 28%, transparent);
 }
 
 .badge--accent {
   background: var(--accent-soft);
   color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
 .badge--block {
@@ -126,8 +131,8 @@
 .table th,
 .table td {
   text-align: left;
-  padding: 5px var(--sp-3);
-  border-bottom: 1px solid var(--border);
+  padding: 8px var(--sp-4);
+  border-bottom: 1px solid var(--border-soft);
   vertical-align: top;
   white-space: nowrap;
 }
@@ -136,17 +141,26 @@
   position: sticky;
   top: 0;
   z-index: 1;
-  background: var(--bg-sunken);
+  background: var(--bg-elev-2);
+  backdrop-filter: blur(8px);
   color: var(--fg-muted);
-  font-size: var(--fs-xs);
-  font-weight: 650;
+  font-size: 10px;
+  font-weight: 680;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  border-bottom: 1px solid var(--border-strong);
+  letter-spacing: 0.12em;
+  border-bottom: 1px solid var(--border);
+}
+
+.table tbody tr {
+  transition: background var(--dur) var(--ease);
 }
 
 .table tbody tr:hover {
   background: var(--bg-hover);
+}
+
+.table tbody tr:last-child td {
+  border-bottom: none;
 }
 
 .table tbody tr.is-clickable {
@@ -249,30 +263,38 @@
 
 /* ── 键值列表 ───────────────────────────────────────────────── */
 
+/* 标签列收窄到刚好放得下（原来是固定 34%，右侧留出一大片空白），
+   行高统一，分隔线用极淡的实线而不是虚线。 */
 .kv {
   display: grid;
-  grid-template-columns: minmax(120px, 34%) minmax(0, 1fr);
-  gap: 1px 0;
+  grid-template-columns: minmax(132px, 208px) minmax(0, 1fr);
+  gap: 0 var(--sp-6);
   font-size: var(--fs-base);
 }
 
 .kv__k {
   color: var(--fg-muted);
-  padding: 3px var(--sp-3) 3px 0;
-  border-bottom: 1px dashed var(--border);
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border-soft);
+  align-self: stretch;
 }
 
 .kv__v {
-  padding: 3px 0;
-  border-bottom: 1px dashed var(--border);
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border-soft);
   overflow-wrap: anywhere;
   min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.kv > :nth-last-child(-n + 2) {
+  border-bottom: none;
 }
 
 .kv--dense .kv__k,
 .kv--dense .kv__v {
-  padding-top: 1px;
-  padding-bottom: 1px;
+  padding-top: 3px;
+  padding-bottom: 3px;
 }
 
 /* ── 标签页 ─────────────────────────────────────────────────── */
@@ -621,12 +643,28 @@
 }
 
 .chart__empty {
-  border: 1px dashed var(--border-strong);
-  border-radius: var(--radius-sm);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-1);
+  min-height: 132px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
   color: var(--fg-muted);
   font-size: var(--fs-sm);
   padding: var(--sp-6);
   text-align: center;
+}
+
+.chart__empty::before {
+  content: "";
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1.5px dashed var(--border-strong);
+  margin-bottom: var(--sp-1);
 }
 
 /* ── 容量条 ─────────────────────────────────────────────────── */
@@ -634,13 +672,31 @@
 .meter {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
   min-width: 140px;
+}
+
+/* 一行：左边说这是什么，右边是数值，下面才是条子 */
+.meter-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-top: var(--sp-4);
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--border-soft);
+}
+
+.meter-row__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
 }
 
 .meter__svg {
   width: 100%;
-  height: 6px;
+  height: 8px;
   display: block;
 }
 
@@ -666,6 +722,10 @@
   font-size: var(--fs-xs);
   color: var(--fg-muted);
   font-variant-numeric: tabular-nums;
+}
+
+.meter__label:empty {
+  display: none;
 }
 
 /* ── Top N 列表 ─────────────────────────────────────────────── */

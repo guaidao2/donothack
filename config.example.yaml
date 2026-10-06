@@ -64,7 +64,6 @@ block_page:
                                  # Category / CategoryLabel / Status / StatusText /
                                  # RetryAfter / ProductName / Version / Contact
 
-
 engine:
   mode: detect                   # detect（只记录）| block | mixed
   fail_mode: open                # open（出错放行，保业务）| closed
@@ -124,10 +123,6 @@ log:
   access_sample_ratio: 100       # sample 模式下每 100 条 pass 记 1 条
 
   capture_payload: false         # 默认不落 payload 原文
-
-metrics:
-  enabled: true
-  addr: "127.0.0.1:9090"
 
 # 控制台与控制面 API
 admin:

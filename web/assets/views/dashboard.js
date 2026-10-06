@@ -41,10 +41,40 @@ function num(value) {
 }
 
 function toMillis(value) {
-  const n = num(value);
-  if (n === null) return null;
+  if (value === null || value === undefined || value === '') return null;
+  // 后端的时间戳是 RFC3339 字符串（"2026-10-06T23:35:00+08:00"），
+  // 早期这里只做 Number() —— 字符串一律变 NaN 被丢掉，于是图表永远空。
+  if (typeof value === 'string') {
+    const t = Date.parse(value);
+    return Number.isFinite(t) ? t : null;
+  }
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
   return n > 1e12 ? n : n * 1000;
 }
+
+/** 把 {lfi:1, xss:2} 与 [{key,n},{name,count}] 两种形态都归一成 [{label, value}]。 */
+function countEntries(raw) {
+  if (!raw) return [];
+  const out = [];
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      const label = String(pick(item, ['key', 'name', 'category', 'label', 'id', 'rule_id', 'path', 'ip'], ''));
+      const value = num(pick(item, ['n', 'count', 'value', 'total', 'hits'], 0)) || 0;
+      if (label) out.push({ label: label, value: value });
+    }
+    return out;
+  }
+  if (typeof raw === 'object') {
+    for (const key of Object.keys(raw)) {
+      const value = num(raw[key]) || 0;
+      if (key) out.push({ label: key, value: value });
+    }
+  }
+  return out;
+}
+
+const SEVERITY_LABEL = { critical: '严重', high: '高', medium: '中', low: '低', info: '提示' };
 
 /** 时间序列容错解析：支持 {points|buckets:[{ts,requests,blocked}]} 与 {series:{requests:[[x,y]]}}。 */
 function readTimeseries(payload) {
@@ -145,16 +175,14 @@ function renderStatus(status) {
     'div',
     { class: 'grid grid--stats' },
     statCard('Profile', textStat(profile), '资源档位'),
+    // 当前值当主数，峰值与预算降级到副行。
+    // 原来把「当前 / 峰值」并排写进主数，窄一点的屏上会折成两行、把整排卡片顶高。
     statCard(
-      '内存（当前 / 峰值）',
-      el(
-        'span',
-        {},
-        el('span', { text: memUsed === null ? '—' : fmtBytes(memUsed) }),
-        el('span', { class: 'faint', text: ' / ' }),
-        el('span', { text: memPeak === null ? '—' : fmtBytes(memPeak) })
-      ),
-      memBudget === null ? '预算未上报' : '预算 ' + fmtBytes(memBudget)
+      '内存',
+      textStat(memUsed === null ? null : fmtBytes(memUsed)),
+      [memPeak === null ? null : '峰值 ' + fmtBytes(memPeak), memBudget === null ? null : '预算 ' + fmtBytes(memBudget)]
+        .filter(Boolean)
+        .join(' · ') || '未上报'
     ),
     statCard('GOMAXPROCS', textStat(gomax), '并行度'),
     statCard('运行时长', textStat(uptime === null ? null : fmtSeconds(uptime)), version ? '版本 ' + version : '版本未上报')
@@ -180,12 +208,23 @@ function renderStatus(status) {
     extra.appendChild(
       el(
         'div',
-        { class: 'stack-1' },
-        el('div', { class: 'xs faint', text: '进程内存占用 / 预算' }),
+        { class: 'meter-row' },
+        el(
+          'div',
+          { class: 'meter-row__head' },
+          el('span', { class: 'sm muted', text: '进程内存占用 / 预算' }),
+          el('span', {
+            class: 'sm num faint',
+            text: fmtBytes(memUsed) + ' / ' + fmtBytes(memBudget) + '（' + fmtPercent(memUsed / memBudget) + '）',
+          })
+        ),
         meter({
           value: memUsed,
           max: memBudget,
-          label: fmtBytes(memUsed) + ' / ' + fmtBytes(memBudget) + '（' + fmtPercent(memUsed / memBudget) + '）',
+          // 说明与数值已经在上面一行排好了，这里不再重复一遍可视文字；
+          // 给读屏留一句完整描述。
+          label: '',
+          ariaLabel: '进程内存占用 ' + fmtBytes(memUsed) + '，预算 ' + fmtBytes(memBudget),
         })
       )
     );
@@ -198,34 +237,37 @@ function renderStatus(status) {
 }
 
 function renderSummary(summary) {
-  const requests = num(pick(summary, ['requests_total', 'total_requests', 'requests']));
-  const blocked = num(pick(summary, ['blocked_total', 'blocks_total', 'blocked', 'deny_total']));
-  const explicitRatio = num(pick(summary, ['block_ratio', 'blocked_ratio']));
-  const ratio = explicitRatio !== null ? explicitRatio : requests && blocked !== null ? blocked / requests : null;
-  const hits = num(pick(summary, ['events_total', 'hits_total', 'attacks_total']));
+  // 后端这个端点的形状是嵌套的：事件计数在 events.*，类目既有映射也有条目数组。
+  // 早期前端按顶层平铺的字段名读（requests_total / categories / top_paths），
+  // 一个都对不上，于是整块面板被判成"空"永不渲染 —— 哪怕库里明明有事件。
+  const events = (summary && typeof summary.events === 'object' && summary.events) || {};
+  const dataplane = (summary && typeof summary.dataplane === 'object' && summary.dataplane) || {};
 
-  const categories = asArray(pick(summary, ['categories', 'by_category', 'category_distribution'], []));
-  const topIps = asArray(pick(summary, ['top_ips', 'top_src_ips', 'top_client_ips'], []));
-  const topPaths = asArray(pick(summary, ['top_paths', 'top_urls'], []));
-  const topRules = asArray(pick(summary, ['top_rules', 'top_rule_ids'], []));
+  const hits = num(pick(events, ['total'], null)) ?? num(pick(summary, ['events_total', 'hits_total', 'attacks_total'], null));
+  const blocked = num(pick(events, ['blocked'], null)) ?? num(pick(summary, ['blocked_total', 'blocks_total'], null)) ?? num(pick(dataplane, ['blocked'], null));
+  const retained = num(pick(events, ['retained'], null));
+  const rateLimited = num(pick(dataplane, ['rate_limited'], null));
+  const rejected = num(pick(dataplane, ['rejected_503'], null));
+  const ratio = hits && blocked !== null ? blocked / hits : null;
+
+  const categoryItems = countEntries(
+    pick(summary, ['top_categories'], null) ?? pick(events, ['by_category'], null) ?? pick(summary, ['categories'], null)
+  );
+  const severityItems = countEntries(pick(events, ['by_severity'], null));
+  const topIps = countEntries(pick(summary, ['top_ips', 'top_src_ips', 'top_client_ips'], null));
 
   const grid = el(
     'div',
     { class: 'grid grid--stats' },
-    statCard('请求总数', textStat(requests === null ? null : fmtInt(requests))),
-    statCard('拦截数', textStat(blocked === null ? null : fmtInt(blocked))),
-    statCard('拦截比例', textStat(ratio === null ? null : fmtPercent(ratio))),
-    statCard('命中事件', textStat(hits === null ? null : fmtInt(hits)))
+    // 只上报真实存在的计数器：没有"请求总数"这一项就不摆那张卡，不用 0 冒充。
+    statCard('命中事件', textStat(hits === null ? null : fmtInt(hits)), retained === null ? '事件缓冲保留数未上报' : '缓冲内保留 ' + fmtInt(retained) + ' 条'),
+    statCard('拦截数', textStat(blocked === null ? null : fmtInt(blocked)), ratio === null ? '拦截比例需要命中数' : '占命中 ' + fmtPercent(ratio)),
+    statCard('自动限速', textStat(rateLimited === null ? null : fmtInt(rateLimited)), '被限速器拦下的请求'),
+    statCard('降级拒绝', textStat(rejected === null ? null : fmtInt(rejected)), '过载降级期间返回的 503')
   );
 
   const halves = el('div', { class: 'grid grid--halves' });
 
-  const categoryItems = categories
-    .map((item) => ({
-      label: String(pick(item, ['name', 'category', 'key', 'label'], '')),
-      value: num(pick(item, ['count', 'value', 'total', 'hits'], 0)) || 0,
-    }))
-    .filter((item) => item.label !== '');
   halves.appendChild(
     card({
       title: '攻击类目分布',
@@ -236,32 +278,43 @@ function renderSummary(summary) {
     })
   );
 
-  const rankCard = (title, list, keyNames, emptyText) =>
+  halves.appendChild(
     card({
-      title: title,
+      title: '严重度分布',
       body:
-        list.length === 0
-          ? el('div', { class: 'chart__empty', text: emptyText })
-          : rankList(
-              list.slice(0, 10).map((item) => ({
-                label: String(pick(item, keyNames, '')),
-                value: num(pick(item, ['count', 'value', 'total', 'hits'], 0)) || 0,
-              }))
-            ),
-    });
+        severityItems.length === 0
+          ? el('div', { class: 'chart__empty', text: '当前范围内没有严重度统计。' })
+          : barChart({
+              items: severityItems.map((item) => ({
+                label: SEVERITY_LABEL[item.label] || item.label,
+                value: item.value,
+              })),
+              height: 170,
+            }),
+    })
+  );
 
-  halves.appendChild(rankCard('Top 10 攻击源 IP', topIps, ['ip', 'client_ip', 'src', 'key'], '当前范围内没有攻击源。'));
-  halves.appendChild(rankCard('Top 10 被攻击路径', topPaths, ['path', 'url', 'key'], '当前范围内没有路径统计。'));
-  halves.appendChild(rankCard('Top 10 命中规则', topRules, ['id', 'rule_id', 'key'], '当前范围内没有命中规则。'));
+  halves.appendChild(
+    card({
+      title: 'Top 10 攻击源 IP',
+      body:
+        topIps.length === 0
+          ? el('div', { class: 'chart__empty', text: '当前范围内没有攻击源。' })
+          : rankList(topIps.slice(0, 10)),
+    })
+  );
 
   return [grid, halves];
 }
 
 function summaryIsEmpty(summary) {
   if (!summary || typeof summary !== 'object') return true;
-  const keys = ['requests_total', 'total_requests', 'blocked_total', 'events_total', 'categories', 'top_ips', 'top_paths', 'top_rules'];
-  for (const key of keys) {
-    const value = summary[key];
+  // 判空只看"后端本来就会返回的字段"：真正的空只有"一个都没返回"。
+  // 全部为 0 是有效数据（就是没挨打），不该显示成"没有指标"。
+  const events = summary.events || {};
+  const dataplane = summary.dataplane || {};
+  const probe = [events.total, events.retained, summary.top_ips, summary.top_categories, dataplane.rate_limited];
+  for (const value of probe) {
     if (Array.isArray(value) ? value.length > 0 : value !== undefined && value !== null) return false;
   }
   return true;

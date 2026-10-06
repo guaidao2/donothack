@@ -157,7 +157,6 @@ type Config struct {
 	Limits    LimitsConfig    `yaml:"limits"`
 	RateLimit RateLimitConfig `yaml:"ratelimit"`
 	Log       LogConfig       `yaml:"log"`
-	Metrics   MetricsConfig   `yaml:"metrics"`
 	Admin     AdminConfig     `yaml:"admin"`
 	Alert     AlertConfig     `yaml:"alert"`
 	BlockPage BlockPageConfig `yaml:"block_page"`
@@ -356,12 +355,6 @@ type LogConfig struct {
 	CapturePayload bool `yaml:"capture_payload"`
 }
 
-// MetricsConfig 是 Prometheus 指标配置（P4 实现）。
-type MetricsConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Addr    string `yaml:"addr"`
-}
-
 // GateConfig 是控制台第一层门槛（防扫描器，不是认证边界）。
 type GateConfig struct {
 	Enabled           bool     `yaml:"enabled"`
@@ -522,7 +515,6 @@ func Default() *Config {
 			AccessMode:        "all",
 			AccessSampleRatio: 100,
 		},
-		Metrics: MetricsConfig{Enabled: true, Addr: "127.0.0.1:9090"},
 		Admin: AdminConfig{
 			Enabled:  true,
 			Addr:     "127.0.0.1:9443",

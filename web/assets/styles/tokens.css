@@ -1,7 +1,11 @@
 /* web/assets/styles/tokens.css
    职责：设计变量集中定义 —— 色板、间距、字号、圆角、阴影、层级、图表配色。
    约束：页面不写行内 style，一律引用这里的变量与 components.css 的类。
-   主题：默认跟随系统（prefers-color-scheme）；若 <html data-theme="dark|light"> 存在则强制该主题。 */
+   主题：默认跟随系统（prefers-color-scheme）；若 <html data-theme="dark|light"> 存在则强制该主题。
+
+   调性：深色为主（安全产品的控制台多数时间开着），主色用靛紫；表面之间靠
+   亮度层级 + 半透明边框分层，不靠描边；圆角偏大，阴影偏软；数字一律 tabular-nums。
+   浅色主题同样可用，只是把同一套语义映射到浅底上。 */
 
 :root {
   color-scheme: light dark;
@@ -18,6 +22,8 @@
   --fs-lg: 16px;
   --fs-xl: 20px;
   --fs-2xl: 26px;
+  --fs-3xl: 32px;
+  --fs-4xl: 40px;
 
   --sp-1: 4px;
   --sp-2: 8px;
@@ -26,90 +32,111 @@
   --sp-5: 20px;
   --sp-6: 24px;
   --sp-8: 32px;
+  --sp-10: 40px;
 
-  --radius-sm: 4px;
-  --radius: 6px;
-  --radius-lg: 10px;
+  --radius-sm: 8px;
+  --radius: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 22px;
 
-  --sidebar-w: 196px;
-  --topbar-h: 48px;
+  --sidebar-w: 212px;
+  --topbar-h: 56px;
   --content-max: 1600px;
 
-  /* 浅色 */
-  --bg: #f4f6f9;
-  --bg-elev: #ffffff;
-  --bg-sunken: #eceff4;
-  --bg-hover: #f0f3f8;
-  --bg-active: #e6ebf3;
-  --border: #dee3ea;
-  --border-strong: #c3cad6;
-  --fg: #171b22;
-  --fg-muted: #56606e;
-  --fg-faint: #8b94a3;
+  --ease: cubic-bezier(0.2, 0, 0.2, 1);
+  --dur: 150ms;
 
-  --accent: #2456d8;
+  /* 浅色 */
+  --bg: #f5f6fb;
+  --bg-elev: #ffffff;
+  --bg-elev-2: #f8f9fe;
+  --bg-sunken: #edeff7;
+  --bg-hover: #f0f1fa;
+  --bg-active: #e6e8f7;
+  --border: #e2e4f0;
+  --border-soft: #eceef6;
+  --border-strong: #c9cce0;
+  --fg: #14131f;
+  --fg-muted: #5a5b73;
+  --fg-faint: #8b8da6;
+  --surface-glow: rgba(109, 94, 252, 0.05);
+
+  --accent: #5a4bd8;
+  --accent-strong: #4a3cc4;
   --accent-fg: #ffffff;
-  --accent-soft: #e8eefc;
+  --accent-soft: #eceafe;
+  --accent-ring: rgba(90, 75, 216, 0.26);
 
   --ok: #15703a;
   --ok-soft: #e4f3e9;
-  --warn: #9a5b06;
+  --warn: #96600a;
   --warn-soft: #fdf2e2;
   --danger: #b3261e;
   --danger-soft: #fcebe9;
   --info: #0d6c86;
   --info-soft: #e3f3f7;
 
-  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
-  --shadow: 0 1px 2px rgba(16, 24, 40, 0.07), 0 10px 28px rgba(16, 24, 40, 0.1);
+  --shadow-sm: 0 1px 2px rgba(20, 19, 31, 0.05);
+  --shadow-md: 0 2px 4px rgba(20, 19, 31, 0.05), 0 10px 24px rgba(20, 19, 31, 0.07);
+  --shadow: 0 8px 18px rgba(20, 19, 31, 0.1), 0 24px 56px rgba(20, 19, 31, 0.14);
+  --glow: 0 6px 20px rgba(90, 75, 216, 0.28);
 
   --z-drawer: 40;
   --z-modal: 50;
   --z-toast: 60;
 
-  --chart-1: #2456d8;
+  --chart-1: #5a4bd8;
   --chart-2: #b3261e;
   --chart-3: #0d6c86;
-  --chart-4: #9a5b06;
-  --chart-5: #6b3fa0;
+  --chart-4: #96600a;
+  --chart-5: #7c3aed;
   --chart-6: #47606f;
+  --chart-fill-opacity: 0.13;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #12151a;
-    --bg-elev: #191d24;
-    --bg-sunken: #0e1116;
-    --bg-hover: #202630;
-    --bg-active: #263040;
-    --border: #2a3038;
-    --border-strong: #3a424e;
-    --fg: #e6e9ef;
-    --fg-muted: #a3adbd;
-    --fg-faint: #737e8f;
+    --bg: #0a0912;
+    --bg-elev: #141221;
+    --bg-elev-2: #1b1830;
+    --bg-sunken: #07060d;
+    --bg-hover: #201d33;
+    --bg-active: #292545;
+    --border: rgba(255, 255, 255, 0.085);
+    --border-soft: rgba(255, 255, 255, 0.05);
+    --border-strong: rgba(255, 255, 255, 0.16);
+    --fg: #eceaf6;
+    --fg-muted: #a5a3bd;
+    --fg-faint: #767491;
+    --surface-glow: rgba(124, 108, 255, 0.07);
 
-    --accent: #6f9bff;
-    --accent-fg: #0b1220;
-    --accent-soft: #1b2740;
+    --accent: #8b7cff;
+    --accent-strong: #a99cff;
+    --accent-fg: #0a0912;
+    --accent-soft: rgba(139, 124, 255, 0.16);
+    --accent-ring: rgba(139, 124, 255, 0.32);
 
     --ok: #5fd08a;
-    --ok-soft: #16281d;
-    --warn: #e0b25c;
-    --warn-soft: #2c2416;
-    --danger: #f08076;
-    --danger-soft: #2e1b1a;
+    --ok-soft: rgba(95, 208, 138, 0.14);
+    --warn: #e5b45f;
+    --warn-soft: rgba(229, 180, 95, 0.14);
+    --danger: #f47f74;
+    --danger-soft: rgba(244, 127, 116, 0.14);
     --info: #63c3d8;
-    --info-soft: #14262c;
+    --info-soft: rgba(99, 195, 216, 0.14);
 
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-    --shadow: 0 1px 2px rgba(0, 0, 0, 0.45), 0 12px 30px rgba(0, 0, 0, 0.5);
+    --shadow-md: 0 2px 6px rgba(0, 0, 0, 0.38), 0 12px 28px rgba(0, 0, 0, 0.32);
+    --shadow: 0 10px 24px rgba(0, 0, 0, 0.45), 0 28px 64px rgba(0, 0, 0, 0.5);
+    --glow: 0 8px 26px rgba(124, 108, 255, 0.35);
 
-    --chart-1: #6f9bff;
-    --chart-2: #f08076;
+    --chart-1: #8b7cff;
+    --chart-2: #f47f74;
     --chart-3: #63c3d8;
-    --chart-4: #e0b25c;
-    --chart-5: #b79bff;
+    --chart-4: #e5b45f;
+    --chart-5: #c4a6ff;
     --chart-6: #93a4b5;
+    --chart-fill-opacity: 0.16;
   }
 }
 
@@ -119,31 +146,41 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #12151a;
-  --bg-elev: #191d24;
-  --bg-sunken: #0e1116;
-  --bg-hover: #202630;
-  --bg-active: #263040;
-  --border: #2a3038;
-  --border-strong: #3a424e;
-  --fg: #e6e9ef;
-  --fg-muted: #a3adbd;
-  --fg-faint: #737e8f;
-  --accent: #6f9bff;
-  --accent-fg: #0b1220;
-  --accent-soft: #1b2740;
+  --bg: #0a0912;
+  --bg-elev: #141221;
+  --bg-elev-2: #1b1830;
+  --bg-sunken: #07060d;
+  --bg-hover: #201d33;
+  --bg-active: #292545;
+  --border: rgba(255, 255, 255, 0.085);
+  --border-soft: rgba(255, 255, 255, 0.05);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --fg: #eceaf6;
+  --fg-muted: #a5a3bd;
+  --fg-faint: #767491;
+  --surface-glow: rgba(124, 108, 255, 0.07);
+  --accent: #8b7cff;
+  --accent-strong: #a99cff;
+  --accent-fg: #0a0912;
+  --accent-soft: rgba(139, 124, 255, 0.16);
+  --accent-ring: rgba(139, 124, 255, 0.32);
   --ok: #5fd08a;
-  --ok-soft: #16281d;
-  --warn: #e0b25c;
-  --warn-soft: #2c2416;
-  --danger: #f08076;
-  --danger-soft: #2e1b1a;
+  --ok-soft: rgba(95, 208, 138, 0.14);
+  --warn: #e5b45f;
+  --warn-soft: rgba(229, 180, 95, 0.14);
+  --danger: #f47f74;
+  --danger-soft: rgba(244, 127, 116, 0.14);
   --info: #63c3d8;
-  --info-soft: #14262c;
-  --chart-1: #6f9bff;
-  --chart-2: #f08076;
+  --info-soft: rgba(99, 195, 216, 0.14);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 2px 6px rgba(0, 0, 0, 0.38), 0 12px 28px rgba(0, 0, 0, 0.32);
+  --shadow: 0 10px 24px rgba(0, 0, 0, 0.45), 0 28px 64px rgba(0, 0, 0, 0.5);
+  --glow: 0 8px 26px rgba(124, 108, 255, 0.35);
+  --chart-1: #8b7cff;
+  --chart-2: #f47f74;
   --chart-3: #63c3d8;
-  --chart-4: #e0b25c;
-  --chart-5: #b79bff;
+  --chart-4: #e5b45f;
+  --chart-5: #c4a6ff;
   --chart-6: #93a4b5;
+  --chart-fill-opacity: 0.16;
 }

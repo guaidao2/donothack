@@ -242,21 +242,57 @@ function renderLogin(notice) {
     el(
       'div',
       { class: 'gate' },
+      // 左栏：讲清这是什么。三个数字都取产品里的实数（规则数、攻击类别、响应体缓冲），
+      // 不写营销口径的虚数 —— 登录页是运维第一次见到它的地方，也是唯一一次会读完的地方。
       el(
         'div',
-        { class: 'card gate__card' },
+        { class: 'gate__hero' },
         el(
           'div',
-          { class: 'card__body' },
-          el('div', { class: 'gate__brand', text: 'donothack 控制台' }),
-          el('div', { class: 'gate__desc', text: '表单登录 + 会话认证；HTTP Basic 门槛只是不让人看见门。' }),
-          notice ? banner('warn', notice, null) : null,
-          form
+          { class: 'gate__hero-top' },
+          el('div', { class: 'gate__hero-brand' }, el('span', { text: 'donothack' })),
+          el('h1', { class: 'gate__hero-title', text: '请求侧 Web 应用防火墙' }),
+          el('p', {
+            class: 'gate__hero-desc',
+            text: '部署在业务服务之前，检查每个请求的头、体与参数；响应不检测、不缓冲、原样透传。单二进制，无外部依赖。',
+          })
+        ),
+        el(
+          'div',
+          { class: 'gate__hero-stats' },
+          heroStat('60', '出厂规则'),
+          heroStat('9', '攻击类别'),
+          heroStat('0', '响应体缓冲')
+        )
+      ),
+      el(
+        'div',
+        { class: 'gate__panel' },
+        el(
+          'div',
+          { class: 'card gate__card' },
+          el(
+            'div',
+            { class: 'card__body' },
+            el('div', { class: 'gate__brand', text: '登录控制台' }),
+            el('div', { class: 'gate__desc', text: '表单登录 + 会话认证；HTTP Basic 门槛只是不让人看见门。' }),
+            notice ? banner('warn', notice, null) : null,
+            form
+          )
         )
       )
     )
   );
   username.focus();
+}
+
+function heroStat(num, label) {
+  return el(
+    'div',
+    { class: 'gate__hero-stat' },
+    el('span', { class: 'gate__hero-num', text: num }),
+    el('span', { class: 'gate__hero-label', text: label })
+  );
 }
 
 /* ── 会话读取失败（后端不可用） ─────────────────────────────── */
@@ -266,7 +302,7 @@ function renderSessionError() {
   showScreen(
     el(
       'div',
-      { class: 'gate' },
+      { class: 'gate gate--single' },
       el(
         'div',
         { class: 'card gate__card' },
