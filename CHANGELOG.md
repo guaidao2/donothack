@@ -114,6 +114,11 @@
   同一台机器上量到的是"多了一跳代理"，不是"WAF 慢"。改为**相对裸反向代理**（`cmd/plainproxy`）比较。
   本机实测印证：medium 档直连 84272 rps、裸代理 26122 rps、donothack 28817 rps —— 相对直连掉 66%，
   相对裸代理是 -10%（落在噪声内，因为 P0 还没有检测逻辑）。
+- **压测逼出一条必须提前管住的资源：审计日志的落盘速率。** P0 实测 29k rps 时约 **22 MB/s**
+  （每请求一条访问日志），8 秒压测写出 176 MB —— 20 GB 磁盘十几分钟写满，而写满之后是
+  "WAF 静默失能"这种最糟的失败模式。已作为 P4 强制项写入 `PERFORMANCE.md` §5.2 与 `DESIGN.md` §14.1：
+  大小轮转 + 有界异步队列 + **`log.access_mode`（`all`/`hit`/`sample`，默认 `hit`）** + 落盘速率进指标。
+  审计日志要留的是"被拦了什么"，不是"有多少正常请求通过"。
 - 脚本从 PowerShell 换成 Python：Windows PowerShell 5.1 缺 `??`、`$IsWindows`、递归 `Select-String`，
   且默认编码是 GBK（中文输出与 UTF-8 子进程输出都会解码失败）。Python 一套脚本跨平台。
 

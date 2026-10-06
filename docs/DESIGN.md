@@ -688,6 +688,7 @@ JSON Lines，一行一事件。字段：
 - 内存里保留最近 N 条命中事件的 ring buffer（按 profile：`small` 256 / `medium` 1024 / `large` 4096），供 `GET /admin/events` 秒级排查。**必须定长**，否则就是一条内存增长路径。
 - 日志写入异步 goroutine + 有界 channel，队列满时**丢弃并计数**（宁可丢日志不能阻塞请求），丢弃数进指标。
 - 内置按大小+时间轮转，不依赖 logrotate。
+- **日志的量必须当成资源管**：P0 压测实测 29k rps 时约 **22 MB/s**，8 秒写出 176 MB —— 20 GB 磁盘十几分钟写满，而写满之后是"WAF 静默失能"这种最糟的失败模式。因此 P4 必须同时具备：大小轮转（`max_size_mb` + `max_backups`）、有界异步队列（满则丢弃并计数）、以及 **`log.access_mode`（`all` / `hit` / `sample`），默认 `hit`** —— 审计日志要留的是"被拦了什么"，不是"有多少正常请求通过"。落盘速率进指标 `donothack_audit_bytes_total`。
 
 ### 14.2 指标（Prometheus 文本格式，`/metrics`）
 
