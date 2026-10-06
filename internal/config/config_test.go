@@ -211,3 +211,30 @@ func TestExampleConfigLoads(t *testing.T) {
 		t.Error("示例配置解析后档位为空")
 	}
 }
+
+// Host 白名单：Host 头是攻击者可控的，应用若回显它就会出现"Host 头注入"类问题。
+// 白名单是我们能主动收口的那一招。
+func TestHostAllowed(t *testing.T) {
+	cases := []struct {
+		patterns []string
+		host     string
+		want     bool
+	}{
+		{nil, "anything.example", true},                               // 空白名单 = 不校验
+		{[]string{"shop.example.com"}, "shop.example.com", true},      // 精确
+		{[]string{"shop.example.com"}, "SHOP.example.com", true},      // 大小写不敏感
+		{[]string{"shop.example.com"}, "shop.example.com:8443", true}, // 带端口
+		{[]string{"shop.example.com"}, "evil.example", false},         // 不在名单
+		{[]string{"*.example.com"}, "api.example.com", true},          // 子域通配
+		{[]string{"*.example.com"}, "example.com", true},              // 裸域也认
+		{[]string{"*.example.com"}, "example.com.evil.net", false},    // 后缀不能乱匹配
+		{[]string{"[::1]"}, "[::1]", true},                            // IPv6 字面量
+		{[]string{"10.0.0.1"}, "10.0.0.1:8080", true},
+	}
+	for _, c := range cases {
+		u := UpstreamConfig{AllowedHosts: c.patterns}
+		if got := u.HostAllowed(c.host); got != c.want {
+			t.Errorf("HostAllowed(patterns=%v, host=%q)=%v，期望 %v", c.patterns, c.host, got, c.want)
+		}
+	}
+}

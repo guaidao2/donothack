@@ -59,6 +59,8 @@ type Options struct {
 type Engine struct {
 	rs   atomic.Pointer[rules.RuleSet]
 	opts Options
+	// exceptions 是控制台维护的例外（与规则文件里的并存）
+	exceptions atomic.Pointer[[]*rules.Exception]
 
 	scratchPool sync.Pool
 }
@@ -82,6 +84,13 @@ func New(o Options) *Engine {
 
 // RuleSet 返回当前规则集。
 func (e *Engine) RuleSet() *rules.RuleSet { return e.rs.Load() }
+
+// SetExceptions 替换控制台维护的例外列表。
+func (e *Engine) SetExceptions(list []*rules.Exception) {
+	cp := make([]*rules.Exception, len(list))
+	copy(cp, list)
+	e.exceptions.Store(&cp)
+}
 
 // Swap 原子替换规则集。在途请求继续用旧规则集，新请求用新的。
 func (e *Engine) Swap(rs *rules.RuleSet) (old *rules.RuleSet) {
@@ -183,6 +192,14 @@ func (e *Engine) Process(ctx context.Context, t *tx.Transaction, req *http.Reque
 		Method: t.Vars.Method,
 		IP:     t.ClientIP,
 	})
+	// 控制台维护的例外与规则文件里的例外合并判断
+	if ex := e.exceptions.Load(); ex != nil && len(*ex) > 0 {
+		exRes.Merge(rules.MatchExceptionList(*ex, rules.ExceptionInput{
+			Path:   t.Vars.Path,
+			Method: t.Vars.Method,
+			IP:     t.ClientIP,
+		}))
+	}
 	if exRes.SkipAll {
 		dec.Reason = "命中例外（skip）"
 		dec.Events = append(dec.Events, tx.Event{

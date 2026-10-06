@@ -189,6 +189,59 @@ type UpstreamConfig struct {
 	MaxIdleConnsPerHost   int      `yaml:"max_idle_conns_per_host"`
 	TCPNoDelay            bool     `yaml:"tcp_nodelay"`
 	PreserveHost          bool     `yaml:"preserve_host"`
+	// AllowedHosts 是允许的 Host 头白名单（支持 *.example.com 通配）。
+	//
+	// 空 = 不校验（默认，兼容任意域名）。
+	// 非空时，Host 不在名单里的请求直接 400 —— 这是防 Host 头攻击
+	// （密码重置投毒、缓存投毒、以及应用回显 Host 造成的注入类 finding）最直接的一招。
+	// 只在**站点域名固定**时开启：多域名/多站点场景请留空。
+	AllowedHosts []string `yaml:"allowed_hosts"`
+}
+
+// HostAllowed 判断 Host 是否在白名单内（空白名单视为允许一切）。
+func (c UpstreamConfig) HostAllowed(host string) bool {
+	if len(c.AllowedHosts) == 0 {
+		return true
+	}
+	h := stripHostPort(host)
+	for _, pat := range c.AllowedHosts {
+		pat = strings.ToLower(strings.TrimSpace(pat))
+		if pat == "" {
+			continue
+		}
+		if strings.HasPrefix(pat, "*.") {
+			// 通配：匹配子域（也匹配裸域，运维的直觉通常如此）
+			suffix := pat[1:] // ".example.com"
+			if strings.HasSuffix(h, suffix) || h == pat[2:] {
+				return true
+			}
+			continue
+		}
+		// 名单条目也走同一套归一化（去端口、去 IPv6 方括号、转小写），
+		// 否则 "[::1]" 这种写法永远匹配不上。
+		if h == stripHostPort(pat) {
+			return true
+		}
+	}
+	return false
+}
+
+func stripHostPort(host string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return host
+	}
+	if strings.HasPrefix(host, "[") {
+		if i := strings.Index(host, "]"); i > 0 {
+			return host[1:i]
+		}
+	}
+	if i := strings.LastIndexByte(host, ':'); i > 0 && !strings.Contains(host[i+1:], ":") {
+		if _, err := strconv.Atoi(host[i+1:]); err == nil {
+			return host[:i]
+		}
+	}
+	return host
 }
 
 // TLSConfig 是数据面 TLS 配置（默认关，很多站点跑明文 HTTP）。

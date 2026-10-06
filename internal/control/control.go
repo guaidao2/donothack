@@ -42,6 +42,24 @@ type State struct {
 	RateLimit RateLimitState
 	// DisabledRules 是控制台里被停用的规则 ID 集合（重载规则时带上）。
 	DisabledRules map[string]bool
+	// Exceptions 是控制台维护的例外（与规则文件里的例外并存）。
+	Exceptions []*rules.Exception
+	// IPLists 是 IP 允许/拒绝名单。
+	IPLists IPListState
+}
+
+// IPListState 是 IP 名单。
+//
+// 语义**刻意不对称**，因为对称的语义很危险：
+//   - Deny：命中即拦（明确拒绝）。
+//   - Allow：命中即**跳过检测与限速**（受信任来源），而**不是**"只允许这些 IP"——
+//     后者一旦配错就是把全站挡在外面，代价与收益完全不成比例。
+//     要限制控制台来源请用 admin.allow_ips（那里失败只影响管理员自己）。
+type IPListState struct {
+	Deny  []string `json:"deny"`
+	Allow []string `json:"allow"`
+	// DenyStatus 是否对拒绝名单返回 403（false 则直接断连）
+	DenyStatus int `json:"deny_status"`
 }
 
 // BlockPageState 是拦截页的当前状态。
@@ -72,6 +90,8 @@ type Applier interface {
 	ApplyRuleset(rs *rules.RuleSet)
 	ApplyBlockPage(renderer *blockpage.Renderer, opts blockpage.Options)
 	ApplyRateLimit(st RateLimitState)
+	ApplyExceptions(list []*rules.Exception)
+	ApplyIPLists(st IPListState)
 }
 
 // Mutation 是一次变更。
@@ -241,6 +261,8 @@ func (c *Control) Apply(m Mutation, actor, remote string) (*State, []string, err
 			c.app.ApplyBlockPage(st.BlockPage.Renderer, st.BlockPage.Options)
 		}
 		c.app.ApplyRateLimit(st.RateLimit)
+		c.app.ApplyExceptions(st.Exceptions)
+		c.app.ApplyIPLists(st.IPLists)
 	}
 	c.mu.Unlock()
 

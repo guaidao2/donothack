@@ -285,6 +285,9 @@ func run(cfgPath string, checkOnly, printBudget, noRules bool) error {
 			BanOnBlock:       cfg.Engine.BanOnBlock,
 			BlockBanDuration: cfg.Engine.BlockBanDuration.D(),
 			Events:           events,
+			AllowedHosts: func(host string) bool {
+				return cfg.Upstream.HostAllowed(host)
+			},
 		})
 		dataplane = pl
 		log.Info("防护组件已就绪",
@@ -322,7 +325,7 @@ func run(cfgPath string, checkOnly, printBudget, noRules bool) error {
 				},
 				DisabledRules: map[string]bool{},
 			},
-			Applier: &applier{engine: eng, pipeline: pl, limiter: limiter},
+			Applier: &applier{engine: eng, pipeline: pl, limiter: limiter, logger: logger},
 		})
 	}
 
@@ -648,6 +651,7 @@ type applier struct {
 	engine   *engine.Engine
 	pipeline *pipeline.Pipeline
 	limiter  *ratelimit.Limiter
+	logger   *audit.Logger
 }
 
 func (a *applier) ApplyRuleset(rs *rules.RuleSet) {
@@ -659,6 +663,21 @@ func (a *applier) ApplyRuleset(rs *rules.RuleSet) {
 func (a *applier) ApplyBlockPage(r *blockpage.Renderer, _ blockpage.Options) {
 	if a.pipeline != nil {
 		a.pipeline.SetBlockPage(r)
+	}
+}
+
+func (a *applier) ApplyExceptions(list []*rules.Exception) {
+	if a.engine != nil {
+		a.engine.SetExceptions(list)
+	}
+}
+
+func (a *applier) ApplyIPLists(st control.IPListState) {
+	if a.pipeline == nil {
+		return
+	}
+	if err := a.pipeline.SetIPLists(st.Allow, st.Deny, st.DenyStatus); err != nil && a.logger != nil {
+		a.logger.App().Error("IP 名单应用失败", "err", err)
 	}
 }
 

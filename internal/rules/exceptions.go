@@ -30,12 +30,18 @@ type MatchResult struct {
 // 例外是"放行"语义，多条命中时结论应当更宽，这样运维不会被
 // "两条例外互相覆盖"这种问题坑到。
 func (rs *RuleSet) MatchExceptions(in ExceptionInput) MatchResult {
+	return MatchExceptionList(rs.exceptions, in)
+}
+
+// MatchExceptionList 在一组例外里找命中的那些（规则文件里的例外与控制台维护的
+// 例外共用这套逻辑 —— 两套判断逻辑迟早会分叉，那种 bug 最难查）。
+func MatchExceptionList(list []*Exception, in ExceptionInput) MatchResult {
 	res := MatchResult{}
-	if len(rs.exceptions) == 0 {
+	if len(list) == 0 {
 		return res
 	}
 	now := time.Now()
-	for _, ex := range rs.exceptions {
+	for _, ex := range list {
 		if !ex.Expires.IsZero() && now.After(ex.Expires) {
 			// 过期例外自动失效：这是"临时例外不会变成永久后门"的机械保证。
 			continue
@@ -160,4 +166,46 @@ func anyIPMatch(list []string, ip string) bool {
 		}
 	}
 	return false
+}
+
+// NewException 构造一条例外（控制台用）。
+//
+// 校验与 YAML 加载路径**完全一致**：reason 与 expires 必填、expires 不超过一年、
+// mode 只能是 skip / detect_only。让控制台绕开这些约束等于把"例外必须写清原因、
+// 必须有过期时间"这条纪律作废 —— 半年后没人敢删的永久后门都是这么来的。
+func NewException(id, reason string, expires time.Time, paths, methods, sourceIPs,
+	disableRules, disableCategories []string, skipRateLimit bool, mode string) (*Exception, error) {
+
+	ref := SourceRef{File: "console", Index: 0}
+	ye := yamlException{
+		ID:              id,
+		Reason:          reason,
+		Expires:         yamlDate{t: expires},
+		Match:           yamlExceptionMatch{Paths: paths, Methods: methods, SourceIPs: sourceIPs},
+		DisableRules:    disableRules,
+		DisableCategory: disableCategories,
+		SkipRateLimit:   skipRateLimit,
+		Mode:            mode,
+	}
+	return compileException(ye, ref)
+}
+
+// MatchInput 供引擎判断一条请求是否命中例外。
+// （与 ExceptionInput 等价，保留旧名以免改动调用方。）
+type MatchInput = ExceptionInput
+
+// Merge 合并另一份匹配结果（文件例外 + 控制台例外的结论要并起来）。
+func (res *MatchResult) Merge(other MatchResult) {
+	if other.Hit != nil && res.Hit == nil {
+		res.Hit = other.Hit
+	}
+	if other.SkipAll {
+		res.SkipAll = true
+	}
+	for k := range other.Disabled {
+		if res.Disabled == nil {
+			res.Disabled = map[string]bool{}
+		}
+		res.Disabled[k] = true
+	}
 }

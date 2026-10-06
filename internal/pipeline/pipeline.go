@@ -12,8 +12,11 @@
 package pipeline
 
 import (
+	"fmt"
 	"net/http"
+	"net/netip"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -53,6 +56,9 @@ type Options struct {
 	// MaxTarpit 是 tarpit 动作的最长延迟（防止把连接池拖死）。
 	MaxTarpit time.Duration
 
+	// AllowedHosts 是 Host 白名单判定（nil 表示不校验）。为空名单时也应传 nil。
+	AllowedHosts func(host string) bool
+
 	// Events 是内存事件存储（控制台的数据源）。nil 表示不记录。
 	//
 	// **只记"有检测结果"的请求**（命中或非放行裁决），不记纯放行的请求 ——
@@ -69,11 +75,17 @@ type Pipeline struct {
 	// blockPage 可被控制台热替换
 	blockPage atomic.Pointer[blockpage.Renderer]
 
+	// IP 名单（可被控制台热替换）
+	ipList atomic.Pointer[ipList]
+
 	blockedTotal atomic.Uint64
 	rateLimited  atomic.Uint64
 	rejected     atomic.Uint64
 	engineErrors atomic.Uint64
 	tarpitted    atomic.Uint64
+	ipDenied     atomic.Uint64
+	ipAllowed    atomic.Uint64
+	hostRejected atomic.Uint64
 }
 
 // Stats 是数据面统计。
@@ -83,6 +95,9 @@ type Stats struct {
 	Rejected503  uint64
 	EngineErrors uint64
 	Tarpitted    uint64
+	IPDenied     uint64
+	IPAllowed    uint64
+	HostRejected uint64
 }
 
 // Stats 返回统计快照。
@@ -93,6 +108,9 @@ func (p *Pipeline) Stats() Stats {
 		Rejected503:  p.rejected.Load(),
 		EngineErrors: p.engineErrors.Load(),
 		Tarpitted:    p.tarpitted.Load(),
+		IPDenied:     p.ipDenied.Load(),
+		IPAllowed:    p.ipAllowed.Load(),
+		HostRejected: p.hostRejected.Load(),
 	}
 }
 
@@ -124,6 +142,49 @@ func New(o Options) *Pipeline {
 	return pl
 }
 
+// ipList 是编译好的 IP 名单。
+type ipList struct {
+	allow      []netip.Prefix
+	deny       []netip.Prefix
+	denyStatus int
+}
+
+// SetIPLists 热替换 IP 允许/拒绝名单。
+//
+// 语义刻意不对称：拒绝名单命中即拦；允许名单命中则**跳过检测与限速**。
+// 允许名单**不是**"只允许这些 IP" —— 配错一次就是把全站挡在外面。
+func (p *Pipeline) SetIPLists(allow, deny []string, denyStatus int) error {
+	l := &ipList{denyStatus: denyStatus}
+	for _, s := range allow {
+		pfx, err := parseCIDROrIP(s)
+		if err != nil {
+			return fmt.Errorf("允许名单：%w", err)
+		}
+		l.allow = append(l.allow, pfx)
+	}
+	for _, s := range deny {
+		pfx, err := parseCIDROrIP(s)
+		if err != nil {
+			return fmt.Errorf("拒绝名单：%w", err)
+		}
+		l.deny = append(l.deny, pfx)
+	}
+	p.ipList.Store(l)
+	return nil
+}
+
+func parseCIDROrIP(s string) (netip.Prefix, error) {
+	s = strings.TrimSpace(s)
+	if pfx, err := netip.ParsePrefix(s); err == nil {
+		return pfx.Masked(), nil
+	}
+	addr, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("%q 既不是 CIDR 也不是 IP", s)
+	}
+	return netip.PrefixFrom(addr, addr.BitLen()), nil
+}
+
 // SetBlockPage 热替换拦截页渲染器（控制台改完拦截页后调用）。
 //
 // 用原子指针：在途请求要么用旧渲染器要么用新的，不会看到半成品。
@@ -152,6 +213,61 @@ func (p *Pipeline) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if len(ipRes.Chain) > 0 {
 			rec.ProxyChain = ipRes.Chain
 		}
+	}
+
+	// ---- 1.5) IP 名单 ----
+	// 拒绝优先：同一个地址同时出现在两个名单里时按拒绝处理（配置事故要往严的方向倒）。
+	if l := p.ipList.Load(); l != nil && (len(l.deny) > 0 || len(l.allow) > 0) {
+		addr, err := netip.ParseAddr(ipRes.IP)
+		if err == nil {
+			for _, pfx := range l.deny {
+				if pfx.Contains(addr) {
+					p.ipDenied.Add(1)
+					if rec != nil {
+						rec.Verdict = "ip_denied"
+						rec.Reason = "命中 IP 拒绝名单"
+					}
+					status := l.denyStatus
+					if status == 0 {
+						status = http.StatusForbidden
+					}
+					d := p.page().NewData(r, txIDFrom(rec), "ban", "IP-DENY", ipRes.IP, status, 0)
+					p.page().Respond(w, r, d, true)
+					return
+				}
+			}
+			for _, pfx := range l.allow {
+				if pfx.Contains(addr) {
+					// 受信任来源：跳过检测与限速，直接转发。
+					// **仍然记录**（审计里能看到"这条是白名单放行的"），
+					// 否则白名单会成为完全不可见的盲区。
+					p.ipAllowed.Add(1)
+					if rec != nil {
+						rec.Verdict = "ip_allowed"
+						rec.Reason = "命中 IP 允许名单，跳过检测"
+					}
+					p.forward(w, r)
+					return
+				}
+			}
+		}
+	}
+
+	// ---- 1.8) Host 白名单 ----
+	// 配了白名单就只认名单里的 Host。**这一步要早做**：Host 影响反代的转发目标
+	// 与应用的绝对链接生成，等检测阶段再管就晚了。
+	if allowed := p.o.AllowedHosts; allowed != nil && !allowed(r.Host) {
+		p.hostRejected.Add(1)
+		if rec != nil {
+			rec.Verdict = "host_rejected"
+			rec.Reason = "Host 不在允许列表内"
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusBadRequest)
+		// **不回显 Host**：那正是这一层要防的东西。
+		_, _ = w.Write([]byte("400 Bad Request: Host not allowed\n"))
+		return
 	}
 
 	// ---- 2) 降级检查 ----

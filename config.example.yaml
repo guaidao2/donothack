@@ -25,6 +25,10 @@ listen:
 
 upstream:
   url: "http://127.0.0.1:9000"
+  allowed_hosts: []              # Host 头白名单（支持 *.example.com）。
+                                 # 留空 = 不校验；站点域名固定时建议开启 ——
+                                 # 应用若回显 Host 会产生"Host 头注入"类问题，
+                                 # 这是 WAF 侧唯一能主动收口的一招。
   dial_timeout: 5s
   response_header_timeout: 30s
   idle_conn_timeout: 30s

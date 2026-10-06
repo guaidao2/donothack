@@ -116,7 +116,16 @@ type Store struct {
 	// 时间序列缓存（最近 24h 的每分钟计数）
 	seqTotal   [1440]uint32
 	seqBlocked [1440]uint32
+
+	// 订阅者（SSE 实时流用）。容量有界：控制台最多几个标签页在看。
+	subMu   sync.Mutex
+	subs    map[int]chan Event
+	nextSub int
 }
+
+// maxSubscribers 限制同时订阅数。**必须有界** —— 订阅者各自持有一个 channel，
+// 无限订阅就是内存泄漏。
+const maxSubscribers = 8
 
 type bucket struct {
 	minute  int64
@@ -135,7 +144,7 @@ func New(o Options) *Store {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	return &Store{o: o, ring: make([]Event, o.RingSize)}
+	return &Store{o: o, ring: make([]Event, o.RingSize), subs: map[int]chan Event{}}
 }
 
 // Len 返回当前保留的事件条数。
@@ -204,6 +213,50 @@ func (s *Store) Add(e Event) {
 	if isBlocking(e.Verdict) {
 		s.blocked.Add(1)
 	}
+	s.publish(e)
+}
+
+// Subscribe 订阅新事件。返回的 channel 有缓冲，**发布者永不阻塞**：
+// 订阅者跟不上就丢事件（实时流丢几条远比卡住数据面可接受）。
+func (s *Store) Subscribe() (<-chan Event, func()) {
+	ch := make(chan Event, 64)
+	s.subMu.Lock()
+	if len(s.subs) >= maxSubscribers {
+		s.subMu.Unlock()
+		close(ch)
+		return ch, func() {}
+	}
+	id := s.nextSub
+	s.nextSub++
+	s.subs[id] = ch
+	s.subMu.Unlock()
+	cancel := func() {
+		s.subMu.Lock()
+		if c, ok := s.subs[id]; ok {
+			delete(s.subs, id)
+			close(c)
+		}
+		s.subMu.Unlock()
+	}
+	return ch, cancel
+}
+
+func (s *Store) publish(e Event) {
+	s.subMu.Lock()
+	for _, ch := range s.subs {
+		select {
+		case ch <- e:
+		default: // 订阅者跟不上：丢这一条，绝不阻塞数据面
+		}
+	}
+	s.subMu.Unlock()
+}
+
+// Subscribers 返回当前订阅者数量（排查连接泄漏用）。
+func (s *Store) Subscribers() int {
+	s.subMu.Lock()
+	defer s.subMu.Unlock()
+	return len(s.subs)
 }
 
 // Get 按 ID 取事件。

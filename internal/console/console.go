@@ -182,6 +182,7 @@ func (s *Server) routes() {
 	// 事件
 	h("/api/v1/events", s.handleEvents)
 	h("/api/v1/events/", s.handleEventByID) // /events/:id 与 /events/:id/raw
+	h("/api/v1/events/stream", s.handleEventsStream)
 
 	// 规则
 	h("/api/v1/rules", s.handleRules)
@@ -189,6 +190,7 @@ func (s *Server) routes() {
 	h("/api/v1/rules/validate", s.handleRulesValidate)
 	h("/api/v1/rules/test", s.handleRulesTest)
 	h("/api/v1/rulesets/reload", s.handleRulesReload)
+	h("/api/v1/rulesets/preview", s.handleRulesPreview)
 
 	// 拦截页（本次新增：内容可在控制台里改）
 	h("/api/v1/block-page", s.handleBlockPage)
@@ -198,6 +200,16 @@ func (s *Server) routes() {
 	h("/api/v1/ratelimit", s.handleRateLimit)
 	h("/api/v1/bans", s.handleBans)
 	h("/api/v1/bans/", s.handleBanByIP)
+
+	// 例外与 IP 名单
+	h("/api/v1/exceptions", s.handleExceptions)
+	h("/api/v1/exceptions/", s.handleExceptions)
+	h("/api/v1/ip-lists", s.handleIPLists)
+	h("/api/v1/ip-lists/", s.handleIPLists)
+
+	// 备份恢复
+	h("/api/v1/backup", s.handleBackup)
+	h("/api/v1/restore", s.handleRestore)
 
 	// 配置与审计
 	h("/api/v1/config", s.handleConfig)

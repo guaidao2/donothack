@@ -3,6 +3,7 @@ package control
 import (
 	"fmt"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -361,4 +362,154 @@ func (m SetRateLimit) Apply(cur *State) (*State, []string, error) {
 	next.RateLimit = st
 	next.Reason = "控制台修改限速"
 	return &next, nil, nil
+}
+
+// ---------------------------------------------------------------- 备份恢复
+
+// SetRulesFromSource 用一段 YAML 直接替换规则集（**不落盘**）。
+//
+// 用途：备份恢复。刻意不写回 rules/ 目录 —— 那会覆盖运维的规则文件，
+// 而"恢复"是个容易点错的操作，出错代价应当是"重启后回到磁盘状态"
+// 而不是"磁盘上的规则被覆盖了"。
+type SetRulesFromSource struct {
+	SourceName string
+	YAML       string
+}
+
+func (m SetRulesFromSource) Name() string { return "rules.restore_from_source" }
+
+func (m SetRulesFromSource) Apply(cur *State) (*State, []string, error) {
+	if strings.TrimSpace(m.YAML) == "" {
+		return nil, nil, fmt.Errorf("规则内容为空")
+	}
+	name := m.SourceName
+	if name == "" {
+		name = "restored.yaml"
+	}
+	opts := rules.DefaultOptions()
+	opts.DisableIDs = cur.DisabledRules
+	rs, err := rules.LoadSource(opts, name, []byte(m.YAML))
+	if err != nil {
+		return nil, nil, err
+	}
+	st := rs.Stats()
+	next := *cur
+	next.RuleSet = rs
+	next.Reason = "从备份恢复规则集"
+	return &next, []string{fmt.Sprintf("已恢复：%d 条规则（启用 %d），变换链 %d 条", st.Rules, st.Enabled, st.Chains)}, nil
+}
+
+// RestoreBlockPage 从备份恢复拦截页。
+type RestoreBlockPage struct {
+	HTML    string
+	Options blockpage.Options
+	File    string
+}
+
+func (m RestoreBlockPage) Name() string { return "block_page.restore" }
+
+func (m RestoreBlockPage) Apply(cur *State) (*State, []string, error) {
+	opts := m.Options
+	opts.CustomHTML = m.HTML
+	if opts.Status == 0 {
+		opts.Status = cur.BlockPage.Options.Status
+	}
+	if opts.ProductName == "" {
+		opts.ProductName = cur.BlockPage.Options.ProductName
+	}
+	r := blockpage.New(opts)
+	if r.CustomError() != "" {
+		return nil, nil, fmt.Errorf("拦截页模板编译失败：%s", r.CustomError())
+	}
+	next := *cur
+	next.BlockPage = BlockPageState{Options: opts, CustomHTML: m.HTML, File: m.File, Renderer: r}
+	next.Reason = "从备份恢复拦截页"
+	return &next, nil, nil
+}
+
+// ---------------------------------------------------------------- 例外
+
+// SetExceptions 整体替换控制台维护的例外列表。
+type SetExceptions struct {
+	List []*rules.Exception
+}
+
+func (m SetExceptions) Name() string { return "exceptions.set" }
+
+func (m SetExceptions) Apply(cur *State) (*State, []string, error) {
+	seen := map[string]bool{}
+	for _, ex := range m.List {
+		if ex == nil {
+			return nil, nil, fmt.Errorf("例外列表里有空条目")
+		}
+		if seen[ex.ID] {
+			return nil, nil, fmt.Errorf("例外 ID %s 重复", ex.ID)
+		}
+		seen[ex.ID] = true
+	}
+	next := *cur
+	next.Exceptions = m.List
+	next.Reason = "控制台更新例外"
+	warn := []string{fmt.Sprintf("当前共 %d 条例外（控制台维护）", len(m.List))}
+	for _, ex := range m.List {
+		if time.Until(ex.Expires) < 72*time.Hour {
+			warn = append(warn, fmt.Sprintf("例外 %s 将在 %s 过期", ex.ID, ex.Expires.Format("2006-01-02")))
+		}
+	}
+	return &next, warn, nil
+}
+
+// ---------------------------------------------------------------- IP 名单
+
+// SetIPLists 更新 IP 允许/拒绝名单。
+type SetIPLists struct {
+	Allow      []string
+	Deny       []string
+	DenyStatus int
+}
+
+func (m SetIPLists) Name() string { return "iplists.set" }
+
+func (m SetIPLists) Apply(cur *State) (*State, []string, error) {
+	// 逐条校验 CIDR/IP：名单写错就是"把攻击者放进来"或"把用户挡在外面"，
+	// 绝不允许静默忽略坏条目。
+	validate := func(list []string, kind string) error {
+		for _, s := range list {
+			s = strings.TrimSpace(s)
+			if s == "" {
+				return fmt.Errorf("%s 名单里有空条目", kind)
+			}
+			if _, err := netip.ParsePrefix(s); err == nil {
+				continue
+			}
+			if _, err := netip.ParseAddr(s); err == nil {
+				continue
+			}
+			return fmt.Errorf("%s 名单里的 %q 既不是 CIDR 也不是 IP", kind, s)
+		}
+		return nil
+	}
+	if err := validate(m.Allow, "允许"); err != nil {
+		return nil, nil, err
+	}
+	if err := validate(m.Deny, "拒绝"); err != nil {
+		return nil, nil, err
+	}
+	// 同一个地址同时出现在两个名单里：拒绝优先，但要提醒 —— 这通常是配置事故。
+	var warn []string
+	for _, a := range m.Allow {
+		for _, d := range m.Deny {
+			if strings.TrimSpace(a) == strings.TrimSpace(d) {
+				warn = append(warn, fmt.Sprintf("%s 同时在允许与拒绝名单里；按「拒绝优先」处理", a))
+			}
+		}
+	}
+	if m.DenyStatus != 0 && (m.DenyStatus < 100 || m.DenyStatus > 599) {
+		return nil, nil, fmt.Errorf("deny_status=%d 不是合法 HTTP 状态码", m.DenyStatus)
+	}
+	next := *cur
+	next.IPLists = IPListState{Allow: m.Allow, Deny: m.Deny, DenyStatus: m.DenyStatus}
+	next.Reason = "控制台更新 IP 名单"
+	warn = append(warn, fmt.Sprintf("允许 %d 条（跳过检测与限速）、拒绝 %d 条", len(m.Allow), len(m.Deny)))
+	return &next, warn, nil
 }
