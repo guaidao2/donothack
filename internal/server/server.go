@@ -240,6 +240,10 @@ type ReadyInfo struct {
 	RejectedTotal   int64   `json:"rejected_total"`
 	Ruleset         string  `json:"ruleset"`
 	UptimeSeconds   float64 `json:"uptime_seconds"`
+
+	// 日志侧的事实：丢弃、轮转、删除都必须能被看到。
+	// 否则出问题时只剩下"日志怎么少了一段"这种无法解释的现象。
+	Log *audit.Stats `json:"log,omitempty"`
 }
 
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
@@ -271,6 +275,10 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	healthy := ok && s.ready.Load()
 	if !healthy {
 		info.Status = "unavailable"
+	}
+	if s.o.Logger != nil {
+		st := s.o.Logger.Stats()
+		info.Log = &st
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

@@ -71,12 +71,19 @@ func run(cfgPath string, checkOnly, printBudget bool) error {
 	}
 
 	logger, err := audit.New(audit.Options{
-		Level:     cfg.Log.Level,
-		Format:    cfg.Log.Format,
-		Output:    cfg.Log.Output,
-		File:      cfg.Log.File,
-		AppOutput: cfg.Log.AppOutput,
-		AppFile:   cfg.Log.AppFile,
+		Level:             cfg.Log.Level,
+		Format:            cfg.Log.Format,
+		Output:            cfg.Log.Output,
+		File:              cfg.Log.File,
+		AppOutput:         cfg.Log.AppOutput,
+		AppFile:           cfg.Log.AppFile,
+		MaxSizeMB:         cfg.Log.MaxSizeMB,
+		MaxBackups:        cfg.Log.MaxBackups,
+		TotalMaxMB:        cfg.Log.TotalMaxMB,
+		MinFreeMB:         cfg.Log.MinFreeMB,
+		Compress:          cfg.Log.Compress,
+		AccessMode:        cfg.Log.AccessMode,
+		AccessSampleRatio: cfg.Log.AccessSampleRatio,
 	})
 	if err != nil {
 		return err

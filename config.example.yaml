@@ -82,8 +82,23 @@ log:
   file: "./logs/donothack.jsonl"
   app_output: stderr             # 应用日志去向：stderr | stdout | file
   app_file: "./logs/donothack-app.log"
-  max_size_mb: 100
-  max_backups: 10
+
+  # 轮转与保留 —— 这几项决定"日志会不会把磁盘写满"。
+  # 实测 29k rps 全量记录约 22 MB/s，没有上限的话 20GB 磁盘十几分钟就满，
+  # 而写满之后是"WAF 静默失能"（最糟的失败模式）。
+  max_size_mb: 100               # 单文件多大就轮转
+  max_backups: 10                # 最多留几份轮转文件
+  total_max_mb: 512              # 日志目录总配额，超了删最旧的（硬顶，优先于 max_backups）
+  min_free_mb: 1024              # 磁盘剩余低于此值就丢弃日志并计数，绝不把盘写满
+  compress: true                 # 轮转后 gzip 旧文件（异步，压不过来就跳过、不阻塞写）
+
+  # 访问日志策略
+  #   all    = 全记（P0/P1 还没有检测能力时用这个，否则等于什么都不记）
+  #   hit    = 只记非 pass（被拦、被限速、502 等）—— 上到 block 模式后推荐
+  #   sample = 非 pass 全记 + pass 按 access_sample_ratio 采样
+  access_mode: all
+  access_sample_ratio: 100       # sample 模式下每 100 条 pass 记 1 条
+
   capture_payload: false         # 默认不落 payload 原文
 
 metrics:

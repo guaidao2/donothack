@@ -215,16 +215,30 @@ type RateLimitConfig struct {
 //
 // 应用日志与访问/审计日志分开：前者默认到 stderr，后者默认到 stdout。
 // 混在一个文件里会让"按字段过滤审计记录"变得别扭。
+//
+// 轮转相关的字段不是"锦上添花"：压测实测 29k rps 全量记录约 22 MB/s，
+// 没有这几道上限，一台 20GB 磁盘的 VPS 十几分钟就会被日志写满，
+// 而写满之后是"WAF 静默失能"。
 type LogConfig struct {
-	Level          string `yaml:"level"`
-	Format         string `yaml:"format"`     // json | text
-	Output         string `yaml:"output"`     // 访问/审计日志：stdout | file
-	File           string `yaml:"file"`       // output=file 时的路径
-	AppOutput      string `yaml:"app_output"` // 应用日志：stderr | stdout | file（空 = stderr）
-	AppFile        string `yaml:"app_file"`   // app_output=file 时的路径
-	MaxSizeMB      int    `yaml:"max_size_mb"`
-	MaxBackups     int    `yaml:"max_backups"`
-	CapturePayload bool   `yaml:"capture_payload"`
+	Level     string `yaml:"level"`
+	Format    string `yaml:"format"`     // json | text
+	Output    string `yaml:"output"`     // 访问/审计日志：stdout | file
+	File      string `yaml:"file"`       // output=file 时的路径
+	AppOutput string `yaml:"app_output"` // 应用日志：stderr | stdout | file（空 = stderr）
+	AppFile   string `yaml:"app_file"`   // app_output=file 时的路径
+
+	// 轮转与保留。三道上限各管一件事，缺一不可。
+	MaxSizeMB  int  `yaml:"max_size_mb"`  // 单文件多大就轮转
+	MaxBackups int  `yaml:"max_backups"`  // 最多留几份轮转文件
+	TotalMaxMB int  `yaml:"total_max_mb"` // 日志目录总配额，超了删最旧的（0 = 不限）
+	MinFreeMB  int  `yaml:"min_free_mb"`  // 磁盘剩余低于此值就丢弃日志（0 = 不检查）
+	Compress   bool `yaml:"compress"`     // 轮转后 gzip 旧文件
+
+	// 访问日志策略：all 全记 | hit 只记非 pass | sample 非 pass 全记 + pass 按比例采样
+	AccessMode        string `yaml:"access_mode"`
+	AccessSampleRatio int    `yaml:"access_sample_ratio"` // sample 模式下每 N 条记 1 条
+
+	CapturePayload bool `yaml:"capture_payload"`
 }
 
 // MetricsConfig 是 Prometheus 指标配置（P4 实现）。
@@ -354,12 +368,23 @@ func Default() *Config {
 			BanDuration:  Duration(300 * time.Second),
 		},
 		Log: LogConfig{
-			Level:      "info",
-			Format:     "json",
-			Output:     "stdout",
-			File:       "./logs/donothack.jsonl",
+			Level:  "info",
+			Format: "json",
+			Output: "stdout",
+			File:   "./logs/donothack.jsonl",
+			// 单文件 100 MiB；总配额 512 MiB —— 注意总配额是硬顶，
+			// 所以实际保留份数通常少于 max_backups（这里 10 × 100MiB 会被总配额先削到约 5 份）。
 			MaxSizeMB:  100,
 			MaxBackups: 10,
+			TotalMaxMB: 512,
+			// 磁盘剩余低于 1 GiB 就停止写日志：日志的价值远低于业务可用性。
+			MinFreeMB: 1024,
+			Compress:  true,
+			// 默认全记：P0/P1 还没有检测能力，此时只记"非 pass"等于什么都不记。
+			// **上到 block 模式时应改成 hit 或 sample** —— 审计日志要留的是
+			// "被拦了什么"，不是"有多少正常请求通过"。
+			AccessMode:        "all",
+			AccessSampleRatio: 100,
 		},
 		Metrics: MetricsConfig{Enabled: true, Addr: "127.0.0.1:9090"},
 		Admin: AdminConfig{
@@ -615,6 +640,32 @@ func (c *Config) validateLog() error {
 		}
 	default:
 		return fmt.Errorf("log.app_output 必须是 stderr | stdout | file，当前为 %q", c.Log.AppOutput)
+	}
+
+	// 轮转与保留：这几项是"日志不会把磁盘写满"的全部保障，必须校验。
+	if c.Log.MaxSizeMB <= 0 {
+		return fmt.Errorf("log.max_size_mb 必须为正数（单文件上限；无上限即等于把磁盘交给日志）")
+	}
+	if c.Log.MaxBackups < 0 {
+		return fmt.Errorf("log.max_backups 不能为负（0 表示只保留当前文件）")
+	}
+	if c.Log.TotalMaxMB < 0 {
+		return fmt.Errorf("log.total_max_mb 不能为负（0 表示不限总配额）")
+	}
+	if c.Log.MinFreeMB < 0 {
+		return fmt.Errorf("log.min_free_mb 不能为负（0 表示不检查磁盘水位）")
+	}
+	if c.Log.TotalMaxMB > 0 && c.Log.TotalMaxMB < c.Log.MaxSizeMB {
+		return fmt.Errorf("log.total_max_mb(%d) 小于 log.max_size_mb(%d)：总配额连一个文件都放不下，会不停删刚写完的文件",
+			c.Log.TotalMaxMB, c.Log.MaxSizeMB)
+	}
+	switch c.Log.AccessMode {
+	case "", "all", "hit", "sample":
+	default:
+		return fmt.Errorf("log.access_mode 必须是 all | hit | sample，当前为 %q", c.Log.AccessMode)
+	}
+	if c.Log.AccessSampleRatio < 0 {
+		return fmt.Errorf("log.access_sample_ratio 不能为负")
 	}
 	return nil
 }
