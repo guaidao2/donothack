@@ -1,0 +1,713 @@
+// Package transform 实现规则里的变换链。
+//
+// 变换是防编码绕过的核心：crackweb 这类扫描器不自带 payload 而是**推导**它们 ——
+// 结构改写（注释分割、关键字拆分、空白替换）叠编码（URL、双 URL、Unicode、hex、
+// HTML 实体、base64）按代数升级。所以规则不能直接拿原始值去比，
+// 必须先"洗"成规范形态。
+//
+// 三条约束：
+//  1. 变换**不得原地修改入参**（入参可能是共享的 body 切片）。
+//  2. 变换失败（如非法 base64）**返回原值**并让调用方计数，不中断规则评估。
+//  3. 每个变换都有迭代/输出上限，防止嵌套编码把 CPU 拖死。
+package transform
+
+import (
+	"bytes"
+	"crypto/md5"
+	"crypto/sha1"
+	"encoding/base64"
+	"encoding/hex"
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+	"unicode/utf8"
+
+	"donothack/internal/kv"
+)
+
+// Func 是变换函数的签名。
+//
+// dst 是调用方给的输出缓冲：容量够就直接往里写（**零分配**），不够就自己 make。
+// 这条约定是热路径零分配的关键 —— 变换链在正常请求上要跑「链数 × 值数」次，
+// 每次都 make 一块缓冲的话，光这一处就是每请求几十次分配。
+//
+// 两条必须守住的不变量：
+//  1. **不得原地修改 in**（in 可能是共享的 body 切片，也可能是 arena 里前一步的输出）；
+//  2. **返回 in 本身是合法的**（表示"这一步没改动"），调用方按需处理。
+type Func func(dst, in []byte, params kv.Params) ([]byte, error)
+
+// grow 取一块长度为 n 的输出缓冲：调用方给的 dst 容量够就用它（零分配）。
+//
+// 与 `append(dst[:0], ...)` 的分工：变长输出用 append 形态，定长输出（编解码）用 grow。
+func grow(dst []byte, n int) []byte {
+	if cap(dst) >= n {
+		return dst[:n]
+	}
+	return make([]byte, n)
+}
+
+var registry = map[string]Func{}
+
+// Register 注册一个变换。重名会 panic —— 这是编译期错误，必须在启动时炸出来。
+func Register(name string, fn Func) {
+	if _, dup := registry[name]; dup {
+		panic("transform: 重复注册 " + name)
+	}
+	registry[name] = fn
+}
+
+// Lookup 查找变换。
+func Lookup(name string) (Func, bool) {
+	fn, ok := registry[name]
+	return fn, ok
+}
+
+// Exists 判断变换是否已注册。
+func Exists(name string) bool {
+	_, ok := registry[name]
+	return ok
+}
+
+// Names 返回全部已注册的变换名（排序）。
+func Names() []string {
+	out := make([]string, 0, len(registry))
+	for k := range registry {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Suggestion 在名字写错时给出最接近的候选。
+func Suggestion(name string) string {
+	best, bestDist := "", 1<<30
+	for _, n := range Names() {
+		d := editDistance(strings.ToLower(name), strings.ToLower(n))
+		if d < bestDist {
+			best, bestDist = n, d
+		}
+	}
+	if bestDist <= 3 {
+		return best
+	}
+	return ""
+}
+
+func editDistance(a, b string) int {
+	la, lb := len(a), len(b)
+	if la == 0 {
+		return lb
+	}
+	if lb == 0 {
+		return la
+	}
+	prev := make([]int, lb+1)
+	cur := make([]int, lb+1)
+	for j := 0; j <= lb; j++ {
+		prev[j] = j
+	}
+	for i := 1; i <= la; i++ {
+		cur[0] = i
+		for j := 1; j <= lb; j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			cur[j] = min3(cur[j-1]+1, prev[j]+1, prev[j-1]+cost)
+		}
+		prev, cur = cur, prev
+	}
+	return prev[lb]
+}
+
+func min3(a, b, c int) int {
+	m := a
+	if b < m {
+		m = b
+	}
+	if c < m {
+		m = c
+	}
+	return m
+}
+
+// ---------------------------------------------------------------- 基础
+
+func init() {
+	Register("none", func(dst, in []byte, _ kv.Params) ([]byte, error) { return in, nil })
+
+	Register("lowercase", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		if !hasUpperASCII(in) {
+			return in, nil
+		}
+		// 先整段拷进 dst，再在原地改大小写。
+		// dst 是调用方给的**输出**缓冲，改它不违反"不得修改入参"——
+		// 这一点很关键：in 可能是共享的 body 切片，也可能是 arena 里前一步的输出。
+		out := append(dst[:0], in...)
+		for i, c := range out {
+			if c >= 'A' && c <= 'Z' {
+				out[i] = c + 'a' - 'A'
+			}
+		}
+		return out, nil
+	})
+
+	Register("uppercase", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		if !hasLowerASCII(in) {
+			return in, nil
+		}
+		out := append(dst[:0], in...)
+		for i, c := range out {
+			if c >= 'a' && c <= 'z' {
+				out[i] = c - ('a' - 'A')
+			}
+		}
+		return out, nil
+	})
+
+	Register("trim", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		if isTrimmed(in) {
+			return in, nil
+		}
+		return bytes.TrimSpace(in), nil
+	})
+}
+
+// ---------------------------------------------------------------- 编码解码
+
+// urlDecodeOnce 做一次 %XX 解码。非法转义原样保留。
+func urlDecodeOnce(dst, in []byte) []byte {
+	out := dst[:0]
+	for i := 0; i < len(in); i++ {
+		if in[i] == '%' && i+2 < len(in) {
+			hi, ok1 := unhex(in[i+1])
+			lo, ok2 := unhex(in[i+2])
+			if ok1 && ok2 {
+				out = append(out, hi<<4|lo)
+				i += 2
+				continue
+			}
+		}
+		out = append(out, in[i])
+	}
+	return out
+}
+
+func unhex(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	default:
+		return 0, false
+	}
+}
+
+func init() {
+	Register("urlDecode", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		if !hasByte(in, '%') {
+			return in, nil
+		}
+		return urlDecodeOnce(dst, in), nil
+	})
+
+	// 连续解码两次：对抗 %2527 这种"双写"绕过。
+	Register("doubleUrlDecode", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		if !hasByte(in, '%') {
+			return in, nil
+		}
+		// 第一次解到 dst；第二次起点另取一块（这里让 append 自己扩容即可，
+		// 因为入口是独立的 in 切片，r 与 dst 不重叠时才能这么写）。
+		r := urlDecodeOnce(dst, in)
+		return urlDecodeOnce(nil, r), nil
+	})
+
+	// %u0041 形式（IIS/老式 unicode 编码）
+	Register("urlDecodeUni", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		if !hasByte(in, '%') {
+			return in, nil
+		}
+		out := dst[:0]
+		for i := 0; i < len(in); i++ {
+			if in[i] == '%' && i+5 < len(in) && (in[i+1] == 'u' || in[i+1] == 'U') {
+				v := 0
+				ok := true
+				for k := 0; k < 4; k++ {
+					h, good := unhex(in[i+2+k])
+					if !good {
+						ok = false
+						break
+					}
+					v = v<<4 | int(h)
+				}
+				if ok {
+					var buf [4]byte
+					n := utf8.EncodeRune(buf[:], rune(v))
+					out = append(out, buf[:n]...)
+					i += 5
+					continue
+				}
+			}
+			out = append(out, in[i])
+		}
+		return out, nil
+	})
+
+	Register("base64Decode", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		if !looksBase64ish(in) {
+			return in, nil
+		}
+		buf := grow(dst, base64.StdEncoding.DecodedLen(len(in)))
+		n, err := base64.StdEncoding.Decode(buf, in)
+		if err != nil {
+			// 解码失败返回原值：变换失败不该中断规则评估。
+			return in, nil
+		}
+		return buf[:n], nil
+	})
+
+	Register("base64DecodeExt", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		if !looksBase64ish(in) {
+			return in, nil
+		}
+		s := strings.TrimRight(string(in), "=")
+		for _, enc := range []*base64.Encoding{base64.RawStdEncoding, base64.RawURLEncoding} {
+			buf := grow(dst, enc.DecodedLen(len(s)))
+			n, err := enc.Decode(buf, []byte(s))
+			if err == nil {
+				return buf[:n], nil
+			}
+		}
+		return in, nil
+	})
+
+	Register("hexDecode", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		if !isHexString(bytes.TrimSpace(in)) {
+			return in, nil
+		}
+		buf := grow(dst, hex.DecodedLen(len(in)))
+		n, err := hex.Decode(buf, bytes.TrimSpace(in))
+		if err != nil {
+			return in, nil
+		}
+		return buf[:n], nil
+	})
+
+	Register("hexEncode", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		buf := grow(dst, hex.EncodedLen(len(in)))
+		hex.Encode(buf, in)
+		return buf, nil
+	})
+
+	// 0x4142 或 X'4142' 形式的 SQL hex 字面量
+	Register("sqlHexDecode", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		s := bytes.TrimSpace(in)
+		if len(s) > 2 && (s[0] == '0') && (s[1] == 'x' || s[1] == 'X') {
+			s = s[2:]
+		} else if len(s) > 3 && (s[0] == 'X' || s[0] == 'x') && s[1] == '\'' && s[len(s)-1] == '\'' {
+			s = s[2 : len(s)-1]
+		} else {
+			return in, nil
+		}
+		buf := grow(dst, hex.DecodedLen(len(s)))
+		n, err := hex.Decode(buf, s)
+		if err != nil {
+			return in, nil
+		}
+		return buf[:n], nil
+	})
+
+	Register("htmlEntityDecode", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		if !hasByte(in, '&') {
+			return in, nil
+		}
+		return htmlEntityDecode(dst, in), nil
+	})
+
+	Register("jsDecode", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		if !hasByte(in, '\\') {
+			return in, nil
+		}
+		return jsDecode(dst, in), nil
+	})
+
+	Register("cssDecode", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		if !hasByte(in, '\\') {
+			return in, nil
+		}
+		return cssDecode(dst, in), nil
+	})
+
+	Register("escapeSeqDecode", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		if !hasByte(in, '\\') {
+			return in, nil
+		}
+		out := dst[:0]
+		for i := 0; i < len(in); i++ {
+			if in[i] == '\\' && i+1 < len(in) {
+				switch in[i+1] {
+				case 'n':
+					out = append(out, '\n')
+				case 'r':
+					out = append(out, '\r')
+				case 't':
+					out = append(out, '\t')
+				case '0':
+					out = append(out, 0)
+				case '\\':
+					out = append(out, '\\')
+				case '\'', '"':
+					out = append(out, in[i+1])
+				default:
+					out = append(out, in[i])
+					continue
+				}
+				i++
+				continue
+			}
+			out = append(out, in[i])
+		}
+		return out, nil
+	})
+}
+
+var htmlEntities = map[string]byte{
+	"lt": '<', "gt": '>', "amp": '&', "quot": '"', "apos": '\'',
+	"nbsp": ' ', "colon": ':', "sol": '/', "lpar": '(', "rpar": ')',
+	"num": '#', "percnt": '%', "plus": '+', "comma": ',', "period": '.',
+	"equals": '=', "quest": '?', "semi": ';', "commat": '@',
+}
+
+func htmlEntityDecode(dst, in []byte) []byte {
+	out := dst[:0]
+	for i := 0; i < len(in); i++ {
+		if in[i] != '&' {
+			out = append(out, in[i])
+			continue
+		}
+		end := bytes.IndexByte(in[i:], ';')
+		if end < 0 || end > 12 {
+			out = append(out, in[i])
+			continue
+		}
+		ent := in[i+1 : i+end]
+		switch {
+		case len(ent) > 1 && ent[0] == '#':
+			var v int
+			var err error
+			if len(ent) > 2 && (ent[1] == 'x' || ent[1] == 'X') {
+				v64, e := strconv.ParseInt(string(ent[2:]), 16, 32)
+				v, err = int(v64), e
+			} else {
+				v, err = strconv.Atoi(string(ent[1:]))
+			}
+			if err == nil && v > 0 && v < utf8.RuneSelf {
+				out = append(out, byte(v))
+				i += end
+				continue
+			}
+			if err == nil && v >= utf8.RuneSelf {
+				var buf [4]byte
+				n := utf8.EncodeRune(buf[:], rune(v))
+				out = append(out, buf[:n]...)
+				i += end
+				continue
+			}
+		default:
+			if b, ok := htmlEntities[strings.ToLower(string(ent))]; ok {
+				out = append(out, b)
+				i += end
+				continue
+			}
+		}
+		out = append(out, in[i])
+	}
+	return out
+}
+
+func jsDecode(dst, in []byte) []byte {
+	out := dst[:0]
+	for i := 0; i < len(in); i++ {
+		if in[i] != '\\' || i+1 >= len(in) {
+			out = append(out, in[i])
+			continue
+		}
+		switch in[i+1] {
+		case 'u':
+			// \uXXXX 或 \u{XXXX}
+			if i+2 < len(in) && in[i+2] == '{' {
+				if end := bytes.IndexByte(in[i+3:], '}'); end > 0 && end <= 6 {
+					if v, err := strconv.ParseInt(string(in[i+3:i+3+end]), 16, 32); err == nil {
+						var buf [4]byte
+						n := utf8.EncodeRune(buf[:], rune(v))
+						out = append(out, buf[:n]...)
+						i += 3 + end
+						continue
+					}
+				}
+			} else if i+5 < len(in) {
+				if v, err := strconv.ParseInt(string(in[i+2:i+6]), 16, 32); err == nil {
+					var buf [4]byte
+					n := utf8.EncodeRune(buf[:], rune(v))
+					out = append(out, buf[:n]...)
+					i += 5
+					continue
+				}
+			}
+		case 'x':
+			if i+3 < len(in) {
+				if v, err := strconv.ParseInt(string(in[i+2:i+4]), 16, 32); err == nil {
+					out = append(out, byte(v))
+					i += 3
+					continue
+				}
+			}
+		}
+		out = append(out, in[i])
+	}
+	return out
+}
+
+func cssDecode(dst, in []byte) []byte {
+	out := dst[:0]
+	for i := 0; i < len(in); i++ {
+		if in[i] != '\\' || i+1 >= len(in) {
+			out = append(out, in[i])
+			continue
+		}
+		j := i + 1
+		v := 0
+		digits := 0
+		for j < len(in) && digits < 6 {
+			h, ok := unhex(in[j])
+			if !ok {
+				break
+			}
+			v = v<<4 | int(h)
+			j++
+			digits++
+		}
+		if digits == 0 {
+			out = append(out, in[i])
+			continue
+		}
+		// CSS 允许一个空白作为转义结束符
+		if j < len(in) && (in[j] == ' ' || in[j] == '\t') {
+			j++
+		}
+		var buf [4]byte
+		n := utf8.EncodeRune(buf[:], rune(v))
+		out = append(out, buf[:n]...)
+		i = j - 1
+	}
+	return out
+}
+
+// ---------------------------------------------------------------- 清洗
+
+func init() {
+	// 去注释：/* */、--、#、<!-- -->
+	//
+	// crackweb 的"结构改写"里第一条就是注释分割（UN/**/ION），
+	// 所以这条变换是必挂的。
+	Register("removeComments", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		if !hasCommentMarker(in) {
+			return in, nil
+		}
+		return replaceComments(dst, in, nil), nil
+	})
+
+	Register("replaceComments", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		if !hasCommentMarker(in) {
+			return in, nil
+		}
+		return replaceComments(dst, in, []byte{' '}), nil
+	})
+
+	Register("removeNulls", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		if !hasByte(in, 0) {
+			return in, nil
+		}
+		return bytes.ReplaceAll(in, []byte{0}, nil), nil
+	})
+
+	Register("compressWhitespace", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		if !needsCompressWhitespace(in) {
+			return in, nil
+		}
+		out := dst[:0]
+		prevWS := false
+		for _, c := range in {
+			isWS := c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
+			if isWS {
+				if prevWS {
+					continue
+				}
+				out = append(out, ' ')
+				prevWS = true
+				continue
+			}
+			out = append(out, c)
+			prevWS = false
+		}
+		return out, nil
+	})
+
+	Register("removeWhitespace", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		if !anyByte(in, " \t\n\r\v\f") {
+			return in, nil
+		}
+		out := dst[:0]
+		for _, c := range in {
+			switch c {
+			case ' ', '\t', '\n', '\r', '\v', '\f':
+				continue
+			}
+			out = append(out, c)
+		}
+		return out, nil
+	})
+
+	Register("length", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		return strconv.AppendInt(nil, int64(len(in)), 10), nil
+	})
+
+	Register("sha1", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		sum := sha1.Sum(in)
+		return []byte(hex.EncodeToString(sum[:])), nil
+	})
+
+	Register("md5", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		sum := md5.Sum(in)
+		return []byte(hex.EncodeToString(sum[:])), nil
+	})
+
+	// 命令行长参数归并：把 "a  b"、"a\tb" 折成单空格，去掉引号噪声。
+	Register("cmdLine", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		// 中间两步 bytes.ReplaceAll 自己会分配（它们返回新切片），
+		// 所以这里只保证入口与出口走 dst。
+		out, _ := registry["compressWhitespace"](dst, in, nil)
+		out = bytes.ReplaceAll(out, []byte(`"`), []byte(` `))
+		out = bytes.ReplaceAll(out, []byte(`'`), []byte(` `))
+		return registry["compressWhitespace"](nil, out, nil)
+	})
+
+	// utf8 → \uXXXX 形式（把多字节字符统一成转义，便于比对）
+	Register("utf8ToUnicode", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		var sb strings.Builder
+		for _, r := range string(in) {
+			if r < utf8.RuneSelf {
+				sb.WriteByte(byte(r))
+				continue
+			}
+			fmt.Fprintf(&sb, "\\u%04x", r)
+		}
+		return []byte(sb.String()), nil
+	})
+
+	// 路径规范化（与 parser 里的实现保持一致的语义；这里独立实现，
+	// 因为 transform 与 parser 在依赖图上是兄弟，互不依赖）
+	Register("normalizePath", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		return normalizePath(dst, in, false), nil
+	})
+	Register("normalizePathWin", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		return normalizePath(dst, in, true), nil
+	})
+}
+
+// replaceComments 去掉 /* */、-- 行注释、#、<!-- -->。
+// if with != nil 时用 with 替换成一个空格（避免把"UN/**/ION"变成"UNION"之外还粘连别的）。
+func replaceComments(dst, in []byte, with []byte) []byte {
+	out := dst[:0]
+	for i := 0; i < len(in); {
+		switch {
+		case i+1 < len(in) && in[i] == '/' && in[i+1] == '*':
+			end := bytes.Index(in[i+2:], []byte("*/"))
+			if end < 0 {
+				i = len(in)
+				continue
+			}
+			if with != nil {
+				out = append(out, with...)
+			}
+			i += 2 + end + 2
+		case i+3 < len(in) && in[i] == '<' && in[i+1] == '!' && in[i+2] == '-' && in[i+3] == '-':
+			end := bytes.Index(in[i+4:], []byte("-->"))
+			if end < 0 {
+				i = len(in)
+				continue
+			}
+			if with != nil {
+				out = append(out, with...)
+			}
+			i += 4 + end + 3
+		case i+1 < len(in) && in[i] == '-' && in[i+1] == '-':
+			// '--' 是行注释：连同行尾换行一起去掉（换行是它的终止符）
+			end := bytes.IndexByte(in[i:], '\n')
+			if end < 0 {
+				i = len(in)
+				continue
+			}
+			if with != nil {
+				out = append(out, with...)
+			}
+			i += end + 1
+		default:
+			out = append(out, in[i])
+			i++
+		}
+	}
+	return out
+}
+
+func normalizePath(dst, in []byte, win bool) []byte {
+	b := dst[:0]
+	b = append(b, urlDecodeOnce(dst, in)...)
+	for i := range b {
+		if b[i] == '\\' && win {
+			b[i] = '/'
+		}
+		if b[i] == 0 {
+			b = b[:i]
+			break
+		}
+	}
+	// 折叠 //
+	out := dst[:0]
+	prevSlash := false
+	for _, c := range b {
+		if c == '/' {
+			if prevSlash {
+				continue
+			}
+			prevSlash = true
+		} else {
+			prevSlash = false
+		}
+		out = append(out, c)
+	}
+	// 消除 ./..
+	segs := bytes.Split(out, []byte{'/'})
+	stack := make([][]byte, 0, len(segs))
+	for _, s := range segs {
+		switch string(s) {
+		case ".":
+			continue
+		case "..":
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+		default:
+			stack = append(stack, s)
+		}
+	}
+	res := bytes.Join(stack, []byte{'/'})
+	if len(res) == 0 || res[0] != '/' {
+		res = append([]byte{'/'}, res...)
+	}
+	return res
+}

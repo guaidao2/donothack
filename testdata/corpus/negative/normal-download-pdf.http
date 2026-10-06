@@ -1,0 +1,6 @@
+GET /downloads/quarterly-report-2024.pdf HTTP/1.1
+Host: files.example.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Accept: application/pdf
+Content-Length: 0
+

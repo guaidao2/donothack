@@ -1,0 +1,27 @@
+# 统一换行符为 LF，避免 core.autocrlf=true 与 gofmt 互相打架导致 diff 噪音。
+# 这个仓库要求「随时对照回滚」，diff 干净是硬需求，所以显式钉死。
+* text=auto eol=lf
+
+# 需要 CRLF 的 Windows 脚本（将来若加）
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制文件，不做任何转换与 diff
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.mmdb binary
+*.prof binary
+*.trace binary
+
+# 注意：不要给 testdata/corpus 加 -diff。
+# 语料是规则的正负样本，改动必须能被 git diff 逐行看到 —— 那是误报审查的依据。

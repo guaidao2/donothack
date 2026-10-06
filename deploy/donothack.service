@@ -1,0 +1,44 @@
+[Unit]
+Description=donothack Web Application Firewall
+Documentation=https://github.com/guaidao2/donothack
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/donothack -c /etc/donothack/config.yaml
+WorkingDirectory=/etc/donothack
+
+Restart=always
+RestartSec=1
+
+# 句柄上限：低配机器默认 1024 太小，连接数一上来就先撞这个
+LimitNOFILE=8192
+
+# 硬内存天花板。配合代码里的 GOMEMLIMIT（软）形成双保险：
+# 软限让 Go 自己 GC，硬限是最后一道。
+# medium 档（2 GiB 机器）留一半给业务；small 档（512 MiB 机器）改成 384M。
+MemoryMax=768M
+CPUQuota=90%
+
+# 关键：整机内存紧张时优先杀 donothack，保证业务活着。
+# 这符合"WAF 不能成为单点故障"这条原则。
+OOMScoreAdjust=200
+
+# 日志交 journald：比自己写文件轮转更省 CPU 与磁盘
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=donothack
+
+# 停机时给足 drain 时间（要 >= config.yaml 里的 listen.shutdown_timeout）
+TimeoutStopSec=30
+
+# 基本的自我加固：不需要写工作目录以外的地方
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/var/log/donothack /etc/donothack/rules
+
+[Install]
+WantedBy=multi-user.target

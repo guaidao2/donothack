@@ -1,0 +1,67 @@
+donothack 许可 v1.0
+自用免费，禁止转售
+donothack License v1.0 — Free to Self-Host, No Resale
+
+版权所有 (c) 2026 guaidao2 & coolmoon
+Required Notice: Copyright (c) 2026 guaidao2 & coolmoon
+
+────────────── 中文（以此为准） ──────────────
+
+一、允许（免费，无需申请）
+
+任何个人或组织都可以免费：
+
+  1. 使用与运行本软件，包括部署在自己的生产环境、用于自己的业务
+     —— 无论是否以营利为目的；
+  2. 修改、二次开发本软件，包括用于内部系统与自有产品；
+  3. 在**不收取任何费用**的前提下复制、分发本软件或其修改版本。
+
+二、禁止（需事先取得版权所有者书面许可）
+
+  1. 销售、转售、出租本软件或其修改版本，或把它（或其修改版本）
+     作为商品、付费产品或付费服务的一部分对外提供；
+  2. 以本软件（或其修改版本）为基础提供**有偿**的托管、代管、SaaS、
+     订阅或安全服务；
+  3. 移除或遮盖本软件中的版权声明、本许可文本与 Required Notice 行。
+
+  一句话：自己用、自己改、免费给别人用 —— 都行；拿它赚钱 —— 先来谈授权。
+
+三、其他
+
+  1. 分发本软件或其修改版本时，必须一并提供本许可文本。
+  2. 本软件按"现状"提供，不附带任何明示或默示的担保（包括但不限于
+     适销性与特定用途适用性）。因使用本软件产生的任何损失，版权所有者
+     不承担责任。
+  3. **版权所有者本人及其所属实体不受本许可限制**，可自由使用、修改与商用
+     —— 许可约束的是被许可方，不约束版权人自己。
+  4. 违反本许可的，本许可自动终止。若在收到书面通知后 30 天内完成整改，
+     许可自动恢复。
+  5. 本许可不授予商标权；也不允许暗示本软件由任何第三方背书。
+
+商业授权请联系：guaidao2 & coolmoon
+
+────────────── English (for reference) ──────────────
+
+Copyright (c) 2026 guaidao2 & coolmoon. All rights reserved.
+
+1. PERMITTED (free of charge, no application required)
+   Anyone may use, run, modify and further develop this software, including
+   deploying it in production for their own business purposes, whether or not
+   for profit; and may copy and distribute the software or modified versions
+   at no charge.
+
+2. NOT PERMITTED (prior written permission required)
+   You may not sell, resell or rent the software or modified versions, include
+   it in a paid product or paid service, or offer paid hosting, managed, SaaS
+   or security services based on it. You may not remove or obscure the
+   copyright notices, this license text, or the Required Notice line.
+
+3. OTHER
+   Distributions must include this license text. The software is provided
+   "as is", without warranty of any kind; the copyright holders are not liable
+   for any damages arising from its use. The copyright holders and their
+   affiliated entities are not restricted by this license. This license
+   terminates automatically upon violation, and is reinstated if the violation
+   is cured within 30 days of written notice. No trademark rights are granted.
+
+Commercial licensing: contact guaidao2 & coolmoon.

@@ -1,0 +1,9 @@
+POST /api/v1/orders HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Content-Type: application/json
+Content-Length: 119
+Accept: application/json
+X-Request-Id: 8f14e45fceea167a5a36dedd4bea2543
+
+{"items":[{"sku":"A-1024","qty":2},{"sku":"B-2048","qty":1}],"coupon":"SPRING10","note":"Please deliver after 18:00."}
