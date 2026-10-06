@@ -136,12 +136,20 @@ admin:
 
   # 第一层：HTTP Basic 门槛 —— 挡扫描器，**不是认证边界**
   # 未过 Basic 时，本端口上所有路径统一 401，不区分路径是否存在
+  #
+  # 注意用户名：门槛的默认用户名是 gate，**不是**下面的 admin。
+  # 浏览器弹的那个 Basic 框要填 gate；进了页面之后的登录框才填 admin。
   gate:
     enabled: true
     mode: basic                  # basic | none
     realm: "Restricted"          # 中性字符串，别写产品名（那等于自报家门）
     username: gate
-    password_hash: ""            # 与登录账号分开；留空则启动时生成并打印
+    password_hash: ""            # 与登录账号分开，可各自轮换。
+                                 # 留空且 admin.password_hash 也留空时：门槛沿用
+                                 # 启动时生成的那个初始口令（日志里两行并排打印）。
+                                 # 但若你设了 admin.password_hash，这一项就必须填 ——
+                                 # 否则启动直接报错（免得门槛变成人人可过的摆设）。
+                                 # 生成方式同下：donothack hash-password
     path_token: ""               # 可选额外遮挡：控制台挂随机路径
     exempt_api_token: true       # 带 X-Donothack-Token 的请求跳过门槛，方便 CLI
     probe_ban_window: 60s

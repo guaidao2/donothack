@@ -71,7 +71,7 @@ func main() {
 			fmt.Println(version.Full())
 			return
 		case "hash-password":
-			os.Exit(runHashPasswordCmd())
+			os.Exit(runHashPasswordCmd(args[1:]))
 		case "help", "-h", "--help":
 			usage()
 			return
@@ -89,6 +89,9 @@ func main() {
 		showBudget = flag.Bool("print-budget", false, "打印档位与内存预算表后退出")
 		noRules    = flag.Bool("no-rules", false, "不加载规则集，只做纯转发（调试用）")
 	)
+	// -h / --help 交给同一个 usage：flag 包默认会打印 "Usage of <本机绝对路径>"，
+	// 既不列子命令，又把本机路径泄在帮助里。
+	flag.Usage = usage
 	flag.Parse()
 
 	if *showVer {
@@ -101,8 +104,15 @@ func main() {
 	}
 }
 
-func usage() {
-	fmt.Fprint(os.Stderr, `donothack —— 请求侧 Web 应用防火墙
+func usage() { writeUsage(os.Stderr) }
+
+// writeUsage 把帮助文本写进 w。
+//
+// 拆出 writer 参数是为了能被测试断言"帮助里必须列出全部子命令与参数"：
+// 帮助缺项是常有的事（加了子命令忘了写帮助，用户就只能靠翻源码），
+// 靠人肉记容易漏，所以交给门禁守。
+func writeUsage(w io.Writer) {
+	fmt.Fprint(w, `donothack —— 请求侧 Web 应用防火墙
 
 用法：
   donothack -c config.yaml              启动数据面
@@ -111,6 +121,17 @@ func usage() {
   donothack test -r req.http            离线跑一条原始请求
   donothack hash-password               生成控制台口令哈希（写进 admin.password_hash）
   donothack version                     打印版本
+  donothack help                        显示本帮助
+
+参数（不带子命令时）：
+  -c string        配置文件路径（默认 "config.yaml"）
+  -version         打印版本后退出
+  -check-config    只校验配置后退出
+  -print-budget    打印档位与内存预算表后退出
+  -no-rules        不加载规则集，只做纯转发（调试用）
+  -h, --help       显示本帮助
+
+完整说明见 README.md。
 `)
 }
 
@@ -464,12 +485,27 @@ func run(cfgPath string, checkOnly, printBudget, noRules bool) error {
 		log.Info("控制台已启动",
 			"addr", cfg.Admin.Addr, "mount", cs.Mount(),
 			"tls", cfg.Admin.TLS.Enabled, "gate", cfg.Admin.Gate.Enabled)
+		// 门槛是否真的启用：enabled 与 mode 都要看（mode=none 表示明确不要门槛）。
+		gateOn := cfg.Admin.Gate.Enabled && cfg.Admin.Gate.Mode != "none"
+		gateUser := firstNonEmpty(cfg.Admin.Gate.Username, "gate")
+
 		if initialPW != "" {
 			// 初始口令只在这里打印一次，**不写进配置文件**（绝不使用默认口令）。
 			log.Warn("控制台初始登录口令（仅本次启动有效，请立即登录后修改）",
 				"username", firstNonEmpty(cfg.Admin.Username, "admin"),
 				"password", initialPW,
 				"login_url", cs.URL())
+			// 门槛用的是**另一套用户名**，必须单独印一行。
+			//
+			// 只印上面那行会把运维带沟里：浏览器弹的是 Basic 框，而上面写的用户名是
+			// admin（那是第二层登录页的用户名）。照着填只会一直 401，且没有任何
+			// 提示说该用 gate。这里把门槛那一行的用户名与同一个口令并排印出来。
+			if gateOn {
+				log.Warn("门槛凭据（HTTP Basic，仅本次启动有效）",
+					"username", gateUser,
+					"password", initialPW,
+					"note", "浏览器弹的 Basic 框填这一行；进页面后再用上面那行的用户名登录")
+			}
 		}
 	}
 
@@ -484,7 +520,31 @@ func run(cfgPath string, checkOnly, printBudget, noRules bool) error {
 // 结果就是运维按文档做不下去。这是补上的那一步。
 //
 // 口令**只从标准输入读**，不接受命令行参数：参数会进 shell 历史与 ps 输出。
-func runHashPasswordCmd() int {
+func runHashPasswordCmd(args []string) int {
+	for _, a := range args {
+		switch a {
+		case "-h", "--help", "help":
+			fmt.Fprint(os.Stderr, `用法：donothack hash-password
+
+从标准输入读一行口令，把 pbkdf2-sha256 哈希打到标准输出，供写进
+config.yaml 的 admin.password_hash（控制台登录）或 admin.gate.password_hash
+（第一层 Basic 门槛，另一套凭据）。口令至少 12 位。
+
+交互输入：
+  donothack hash-password
+
+管道输入（口令不回显）：
+  echo -n '你的口令' | donothack hash-password
+
+口令不能作为命令行参数传入：参数会进 shell 历史与 ps 输出。
+`)
+			return 0
+		default:
+			fmt.Fprintf(os.Stderr, "donothack: hash-password 不接受参数 %q（口令请从标准输入给）\n", a)
+			return 2
+		}
+	}
+
 	fmt.Fprintln(os.Stderr, "请输入控制台登录口令（至少 12 位，回车结束）。")
 	fmt.Fprintln(os.Stderr, "提示：输入会回显，请在可信终端操作；也可以用管道喂进来：")
 	fmt.Fprintln(os.Stderr, "  echo -n '你的口令' | donothack hash-password")
