@@ -1,4 +1,4 @@
-# wafd 架构设计
+# donothack 架构设计
 
 > 状态：待评审（v0 设计稿）
 > 目标读者：本项目开发者
@@ -8,29 +8,31 @@
 
 ## 1. 项目定位
 
-`wafd` 是一个用 Go 编写的、生产环境可用的 Web 应用防火墙，以独立反向代理形态部署在业务服务之前。
+`donothack` 是一个用 Go 编写的、生产环境可用的 Web 应用防火墙，以独立反向代理形态部署在业务服务之前。
 
-一句话：**客户端 → wafd → 上游业务**，请求和响应都过检测流水线，命中则按决策模型放行、记录、拦截、挑战或限速。
+一句话：**客户端 → donothack → 上游业务**。核心职责是判断请求头、请求体与参数里有没有攻击 payload，命中则按决策模型放行、记录、拦截、挑战或限速。
 
 ### 设计目标
 
 | 目标 | 说明 |
 | --- | --- |
+| 检测准 | **核心 KPI。** 覆盖 SQLi / XSS / RCE / LFI / webshell / 扫描器等常见 payload，同时误报率可控。范围只做请求侧，见非目标。 |
 | 生产可用 | 不是演示品。零停机热加载、优雅停机、健康探针、可观测性、误报可治理，全部是必备项。 |
 | 单二进制 | 纯 Go，无 CGO，`CGO_ENABLED=0` 交叉编译，不依赖 nginx / Apache / Lua / PCRE 动态库。 |
-| **低配 VPS 能跑** | **首要约束。** 最低支持 1 vCPU / 512 MiB，空载常驻 < 15 MiB、满负载 < 48 MiB。分级与预算见 `docs/PERFORMANCE.md`。 |
-| 低开销 | 无命中路径附加延迟 P99 < 0.5ms（1 vCPU），吞吐相对直连下降 < 10%。热路径零分配，见 `docs/PERFORMANCE.md`。 |
+| **低配 VPS 能跑** | **首要约束。** 目标机型 2 vCPU / 2 GiB（`medium` 档），最低支持 1 vCPU / 512 MiB（`small` 档）。预算见 `docs/PERFORMANCE.md`。 |
+| 低开销 | 无命中路径附加延迟 P99 < 0.5ms，吞吐相对直连下降 < 10%。热路径零分配，见 `docs/PERFORMANCE.md`。 |
 | 不成为单点故障 | 任何解析或规则异常都必须 fail-open 放行并留审计，绝不因为 WAF 自身错误导致业务 5xx。 |
 | 可对照回滚 | 规则、配置、代码全部进 git，每次决策可追溯到规则 ID 与规则文件版本。 |
 | 规则可读可写 | 自研 YAML DSL，安全工程师不需要写 Go 就能加规则；预留 ModSecurity SecRules 兼容层。 |
 
 ### 非目标（明确不做）
 
-- **不做 DDoS / 流量清洗**：四层洪水交给上游清洗设备或云厂商，wafd 只处理七层语义。
+- **不做响应侧检测**：不检查、不缓冲、不修改响应体与响应头。本轮只判断请求侧 payload。后续若要加（数据泄露、报错回显），按 §12 的保留设计评估，但会重新吃回响应缓冲的内存与延迟成本。
+- **不做 DDoS / 流量清洗**：四层洪水交给上游清洗设备或云厂商，donothack 只处理七层语义。
 - **不做内容缓存 / CDN**：不缓存响应体。
 - **不做多上游负载均衡编排**：P0–P4 只支持单上游（或简单轮询），服务发现留给 P5 之后。
 - **不做分布式协同封禁**：单机内存限速为主；多副本只通过 Redis 共享限速与封禁状态，不做全局威胁情报。
-- **不自研 TLS 栈**：用标准库 `crypto/tls`。
+- **不自研 TLS 栈**：用标准库 `crypto/tls`。明文 HTTP 与 HTTPS 都要支持，TLS 默认关（很多站点跑 HTTP）。
 
 ---
 
@@ -56,9 +58,9 @@
 
 ```
                     ┌──────────────────────────────────────────────────────┐
-                    │                      wafd                            │
+                    │                     donothack                        │
                     │                                                      │
-  Client ──TLS──▶   │  ┌──────────┐   ┌──────────┐   ┌─────────────────┐  │
+  Client ─HTTP/TLS─▶│  ┌──────────┐   ┌──────────┐   ┌─────────────────┐  │
                     │  │ realip   │──▶│ listener │──▶│  Transaction    │  │
                     │  │ (XFF)    │   │ (h1/h2)  │   │  (per request)  │  │
                     │  └──────────┘   └──────────┘   └────────┬────────┘  │
@@ -70,7 +72,7 @@
                     │                                         │           │
                     │        ┌────────────────────────────────▼───────┐   │
                     │        │            engine (phases)             │   │
-                    │        │  P1 headers ─P2 body ─P3 resp hdr ─P4 │   │
+                    │        │    P1 headers ──▶ P2 body / args       │   │
                     │        │       └── ruleset (atomic.Pointer)     │   │
                     │        │       └── score accumulator            │   │
                     │        └───────────────┬────────────────────────┘   │
@@ -82,7 +84,7 @@
                     │            └───────────┬───────────┘                │
                     │                        │                            │
                     │   ┌────────────────────▼─────────────────────┐      │
-                    │   │  proxy (RoundTrip, body tee, ws tunnel)  │──────┼──▶ Upstream
+                    │   │  proxy (RoundTrip, ws tunnel, 响应流式)   │──────┼──▶ Upstream
                     │   └────────────────────┬─────────────────────┘      │
                     │                        │                            │
                     │   ┌────────────────────▼─────────────────────┐      │
@@ -91,16 +93,17 @@
                     └──────────────────────────────────────────────────────┘
 ```
 
+**检测范围只覆盖请求侧**：请求头、请求体、（含 query / form / JSON / XML / multipart 的）参数。响应侧不缓冲、不检测、不修改，直接流式透传回客户端 —— 这在低配上同时省掉了响应缓冲的内存与延迟，是性能上的一大笔收益。
+
 ### 数据流（一次请求）
 
-1. 连接进来，`realip` 按信任链解析真实客户端 IP。
+1. 连接进来，`realip` 按信任链解析真实客户端 IP。**明文 HTTP 站上 `X-Forwarded-For` 是唯一来源，`trusted_proxies` 必须配准**，否则伪造 XFF 即可绕过限速与封禁。
 2. 建 `Transaction`，分配 tx id、起始时间。
-3. 阶段 1：解析请求行与请求头，装填变量集合，跑阶段 1 规则（扫描器指纹、畸形协议、恶意 UA）。
-4. 阶段 2：按需读取请求体（受 `maxInspectBody` 限制），解压、解码、解析为参数并跑阶段 2 规则（SQLi、XSS、RCE、LFI、webshell）。
+3. 阶段 1：解析请求行与请求头，装填变量集合，跑阶段 1 规则（扫描器指纹、畸形协议、恶意 UA、异常头）。
+4. 阶段 2：按需读取请求体（受 `max_inspect_body` 限制），解压、解码、解析为参数并跑阶段 2 规则（SQLi、XSS、RCE、LFI、webshell）。
 5. 决策：若累计分数超入站阈值或命中硬拦截规则，执行动作（默认 403），写审计，结束。
-6. 否则转发上游，`body tee` 保留响应体副本（受 `maxInspectResponse` 限制）。
-7. 阶段 3/4：检查响应头与响应体（敏感数据泄露、报错回显、webshell 回连特征）。
-8. 阶段 5：收尾，写审计日志、更新指标。
+6. 否则转发上游；响应**不缓冲、不检测**，流式透传回客户端。
+7. 收尾：写审计日志、更新指标。
 
 ---
 
@@ -170,11 +173,8 @@ type Collections struct {
 	Body       []byte
 	BodyTruncated bool  // 超限截断标记，审计要记
 
-	// 响应侧（阶段 3/4 装填）
-	ResStatus  int
-	ResHeaders Params
-	ResBody    []byte
-	ResTruncated bool
+	// 响应侧：本轮**不装填**，字段保留以便将来加响应检测时不必改结构
+	// （见 §12，以及 §1 非目标）
 
 	// 派生
 	RawIP     string
@@ -224,19 +224,19 @@ type Var struct {
 模块边界即多人/多 agent 并行开发时的写入边界，禁止跨包直接改别人内部状态。
 
 ```
-cmd/wafd/              main：命令行解析、装配、信号处理
-cmd/wafdctl/           管理客户端（reload、规则自测、状态查询）——可选，P4
+cmd/donothack/              main：命令行解析、装配、信号处理
+cmd/donothackctl/           管理客户端（reload、规则自测、状态查询）——可选，P4
 
 internal/config/       配置结构体、YAML 加载、校验、默认值、热加载协调
 internal/tx/           Transaction、Collections、Event、Verdict、Score 定义
-internal/parser/       请求/响应 → Collections（路径规范化、解码链、解压、JSON/XML/multipart）
+internal/parser/       请求 → Collections（路径规范化、解码链、解压、JSON/XML/multipart）
 internal/transform/    变换函数注册表与实现
 internal/operator/     算子注册表与实现（regex、pm、detectSQLi、detectXSS、entropy、luhn、ipMatch…）
 internal/rules/        规则模型、YAML 加载、编译、索引、RuleSet 与原子替换
 internal/engine/       阶段流水线调度、分数累计、决策
 internal/actions/      block / log / tarpit / challenge / ratelimit 执行器
 internal/ratelimit/    令牌桶与滑动窗口、临时封禁、状态后端接口（memory / redis）
-internal/proxy/        反向代理、body tee、WebSocket 隧道、连接池
+internal/proxy/        反向代理、WebSocket 隧道、响应流式透传（不做 body 缓冲）、连接池
 internal/realip/       可信代理链与真实 IP 还原
 internal/audit/        结构化审计日志、文件轮转、异步写入
 internal/metrics/     Prometheus 指标
@@ -252,7 +252,7 @@ scripts/               压测、语料回归、构建脚本
 ### 依赖方向（只允许自上而下）
 
 ```
-cmd/wafd
+cmd/donothack
   └─ config
   └─ proxy ─┬─ engine ─┬─ rules ─┬─ parser
             │          │         ├─ transform
@@ -327,14 +327,16 @@ type Action interface {
 ```go
 // internal/engine
 type Engine interface {
-	// Phase1 请求头；可能直接返回终止裁决
+	// Phase1 请求行与请求头；可能直接返回终止裁决
 	Phase1(ctx context.Context, t *tx.Transaction) (tx.Verdict, error)
+	// Phase2 请求体与参数
 	Phase2(ctx context.Context, t *tx.Transaction) (tx.Verdict, error)
-	Phase3(ctx context.Context, t *tx.Transaction) (tx.Verdict, error)
-	Phase4(ctx context.Context, t *tx.Transaction) (tx.Verdict, error)
+	// Phase5 收尾：审计与指标。响应侧不做检测，因此没有 Phase3/Phase4。
 	Phase5(ctx context.Context, t *tx.Transaction)
 }
 ```
+
+阶段号仍保留 1/2/5，是为了将来若恢复响应侧检测（§12）能直接占用 3/4 而不改动规则语义与 SecRules 兼容映射。
 
 ### 7.5 RateLimiter
 
@@ -398,10 +400,10 @@ compressWhitespace → lowercase
 ### 8.4 边界处理
 
 - 请求体检查上限 `limits.max_inspect_body`，按 profile 取值（`small` 128 KiB / `medium` 512 KiB / `large` 1 MiB）；超限只检查前 N 字节，`BodyTruncated=true` 进审计。**不因为超限就拒绝**（大文件上传是正常业务）。
-- 响应体检查上限 `limits.max_inspect_response`，按 profile 取值（`small` 8 KiB / `medium` 256 KiB / `large` 512 KiB）。
-- 二进制响应（`Content-Type` 非文本，或 `Content-Type` 缺失但魔数匹配常见二进制格式）跳过阶段 4，只查响应头。
+- 响应**完全不读入内存**，直接流式透传给客户端（本轮不做响应侧检测，见 §12）。`max_inspect_response` 配置项保留但当前不生效。
 - `Content-Length` 与实际不符 → 记分（请求走私迹象）。
 - 同时出现 `Content-Length` 与 `Transfer-Encoding` → 记分（HTTP 请求走私）。
+- 上游连接失败或超时 → 按 `engine.fail_mode` 处理，默认返回 502 并记审计；**不静默降级成"未检测直连"**（那等于凭空绕过 WAF）。
 
 ### 8.5 健壮性要求
 
@@ -485,7 +487,7 @@ exceptions:
 ```yaml
 scoring:
   inbound_anomaly_threshold: 5     # 入站累计达到 5 分 → 拦
-  outbound_anomaly_threshold: 4    # 出站
+  # outbound_anomaly_threshold 保留配置位但不生效（本轮不做响应侧检测，见 §12）
   categories:
     sqli:     5
     xss:      5
@@ -495,8 +497,8 @@ scoring:
     webshell: 5
     scanner:  3
     protocol: 5
-    leakage:  4
     upload:   3
+    # leakage（响应侧泄露）保留但不生效，见 §12
 ```
 
 规则声明自己属于哪个类目，命中时加该分。这样单条弱规则（扫描器 UA）不会直接封站，而 SQLi 命中一条就够拦。
@@ -556,16 +558,21 @@ const (
 
 ---
 
-## 12. 响应侧检测
+## 12. 响应侧检测（**本轮不做**，保留设计）
 
-响应检测的目的不是拦攻击者，而是**阻止利用成功后的数据外带和回显**：
+**范围决定：本轮只判断请求头、请求体与参数里有没有攻击 payload，响应侧不检测、不缓冲、不修改。** 理由是需求明确收窄，而且不做响应缓冲在低配机器上省下的是实打实的内存与延迟。
 
+以下内容作为**将来若要加回来**的设计备忘保留：
+
+- 目的不是拦攻击者，而是阻止利用成功后的数据外带与回显。
 - 敏感数据泄露：身份证、银行卡（Luhn 校验）、手机号、私钥（`-----BEGIN ... PRIVATE KEY-----`）、云厂商 AK/SK 形态、JWT。
 - 报错回显：`SQL syntax`、`ORA-`、`Warning: mysql_`、Go panic 栈、Java 堆栈。
 - Webshell 特征：响应体含 `eval(`、`base64_decode(` 且请求侧有可疑参数。
 - 响应头安全校验（可选，记分不拦）：缺 `X-Content-Type-Options`、缺 `Content-Security-Policy`、`Server` 头版本泄露。
 
-响应体检测的难点是**流式响应**。策略：先缓冲到 `max_inspect_response`，检查完再一次性写给客户端；超过上限则边转发边检查前 N 字节，后续透传。对 SSE / chunked 长连接，只检查第一批数据块。
+**代价要先说清**：一旦恢复响应体检测，就必须缓冲响应体（流式响应只能缓冲前 N 字节再放行），CPU 与内存预算都要重算，`small` 档基本承受不住。所以这件事要做就得单独评估，不能顺手加。
+
+代码结构上已经留好位置：`Engine` 保留阶段号 3/4（§7.4），`Collections` 保留响应字段（§5.2），规则 DSL 保留 `RESPONSE_*` 集合（`docs/RULES.md` §5.1），但都标记为未实现。
 
 ---
 
@@ -576,7 +583,7 @@ const (
 ```go
 // internal/config
 type Config struct {
-	Profile   string          `yaml:"profile"`  // small | medium | large | auto（按 cgroup 探测）
+	Profile   string          `yaml:"profile"`  // small | medium | large | auto（按 cgroup 探测；探测不到取 medium）
 	Listen    ListenConfig    `yaml:"listen"`
 	Upstream  UpstreamConfig  `yaml:"upstream"`
 	TLS       TLSConfig       `yaml:"tls"`
@@ -600,6 +607,8 @@ type RealIPConfig struct {
 ```
 
 `trusted_proxies` 为空时，**忽略所有 XFF**，直接用连接对端地址。这是安全默认值。
+
+**明文 HTTP 场景要特别注意**：站点跑 HTTP 时（本项目的常见场景），如果前面有 nginx 或 CDN，`trusted_proxies` 必须填对，否则限速与封禁的 key 会退化成代理 IP（全员共享一个桶），或者被伪造 XFF 直接绕过。启动时若 `trusted_proxies` 为空但检测到请求带 `X-Forwarded-For`，打一次 `level=warn`。
 
 ### 13.2 热加载
 
@@ -664,7 +673,7 @@ JSON Lines，一行一事件。字段：
 原则：
 
 - **默认不记录 payload 原文**，只记目标名、算子、命中长度与指纹描述。防止审计日志本身变成敏感数据泄露点和存储炸弹。
-- 需要取证时用 `log.capture_payload: true`（默认关）或在 `wafdctl replay` 里按 tx_id 从 ring buffer 取。
+- 需要取证时用 `log.capture_payload: true`（默认关）或在 `donothackctl replay` 里按 tx_id 从 ring buffer 取。
 - 内存里保留最近 N 条命中事件的 ring buffer（按 profile：`small` 256 / `medium` 1024 / `large` 4096），供 `GET /admin/events` 秒级排查。**必须定长**，否则就是一条内存增长路径。
 - 日志写入异步 goroutine + 有界 channel，队列满时**丢弃并计数**（宁可丢日志不能阻塞请求），丢弃数进指标。
 - 内置按大小+时间轮转，不依赖 logrotate。
@@ -672,23 +681,23 @@ JSON Lines，一行一事件。字段：
 ### 14.2 指标（Prometheus 文本格式，`/metrics`）
 
 ```
-wafd_requests_total{mode,verdict}                    counter
-wafd_request_duration_seconds{phase}                 histogram
-wafd_rule_hits_total{rule_id,category,severity}      counter
-wafd_verdict_total{verdict}                          counter
-wafd_blocked_total{rule_id}                          counter
-wafd_parse_errors_total{reason}                      counter
-wafd_body_truncated_total{direction}                 counter
-wafd_ratelimit_rejected_total{key_type}              counter
-wafd_banned_ips_current                             gauge
-wafd_ruleset_version_info{version,loaded_at}         gauge
-wafd_ruleset_reload_total{result}                    counter
-wafd_upstream_errors_total{reason}                   counter
-wafd_audit_dropped_total                             counter
-wafd_go_goroutines / wafd_go_memstats_*              runtime
+donothack_requests_total{mode,verdict}                    counter
+donothack_request_duration_seconds{phase}                 histogram
+donothack_rule_hits_total{rule_id,category,severity}      counter
+donothack_verdict_total{verdict}                          counter
+donothack_blocked_total{rule_id}                          counter
+donothack_parse_errors_total{reason}                      counter
+donothack_body_truncated_total{direction}                 counter
+donothack_ratelimit_rejected_total{key_type}              counter
+donothack_banned_ips_current                             gauge
+donothack_ruleset_version_info{version,loaded_at}         gauge
+donothack_ruleset_reload_total{result}                    counter
+donothack_upstream_errors_total{reason}                   counter
+donothack_audit_dropped_total                             counter
+donothack_go_goroutines / donothack_go_memstats_*              runtime
 ```
 
-`wafd_rule_hits_total` 是**误报治理的核心数据源**：检测模式跑一段时间后，按 rule_id 看命中量和命中样本，人工复核误报率，再决定哪条规则够格进拦截档。
+`donothack_rule_hits_total` 是**误报治理的核心数据源**：检测模式跑一段时间后，按 rule_id 看命中量和命中样本，人工复核误报率，再决定哪条规则够格进拦截档。
 
 ### 14.3 健康与探针
 
@@ -723,46 +732,56 @@ wafd_go_goroutines / wafd_go_memstats_*              runtime
 
 启动时按 cgroup 自动探测内存与 CPU，选 `small` / `medium` / `large` 三档，档位决定检查上限、连接上限、规则集上限、GOGC 与 GOMEMLIMIT。
 
-| 项 | `small`（1 vCPU / 512 MiB） | `medium` | `large` |
+**目标机型是 `medium`（2 vCPU / 2 GiB），`small`（1 vCPU / 512 MiB）是必须保证能跑的最低线。**
+
+| 项 | `small`（1 vCPU / 512 MiB） | `medium`（2 vCPU / 2 GiB，**目标档**） | `large` |
 | --- | --- | --- | --- |
-| 请求体 / 响应体检查上限 | 128 KiB / 8 KiB | 512 KiB / 256 KiB | 1 MiB / 512 KiB |
+| 请求体检查上限 | 128 KiB | 512 KiB | 1 MiB |
 | 最大并发连接 | 256 | 1024 | 4096 |
 | 规则集上限 | 400 条 | 2000 条 | 10000 条 |
-| HTTP/2 与 h2c | 关 | 开 | 开 |
-| 阶段 4 响应体检测 | 默认关 | 开 | 开 |
+| 空载 / 满负载内存目标 | < 15 / 48 MiB | < 25 / 120 MiB | < 80 / 600 MiB |
+| 吞吐目标（1 KiB GET） | ≥ 3000 rps | ≥ 8000 rps | ≥ 20000 rps |
+| HTTP/2 与 h2c | 关 | 关（明文站用不上；启用 TLS 时可开） | 开 |
+
+响应体检查上限不再需要 —— 本轮不做响应侧检测，响应纯流式透传。
 
 ### 15.2 架构层面的手段
 
 | 手段 | 说明 |
 | --- | --- |
 | **变换链去重 + 单次 AC 扫描** | 低配下最重要的优化。编译期把全部规则的变换链归一化去重（实践中 300 条规则只有 5~10 条不同链），运行期每个不同链只算一次、只扫一次，命中候选再跑昂贵算子。详见 `PERFORMANCE.md` §4。 |
-| **热路径零分配** | 1 核上 GC 是主要 CPU 消耗。`BenchmarkEngine_NoMatch` 硬门禁 0 allocs/op，端到端 wafd 自身新增分配 ≤ 2 allocs/req。禁用 `net/url` 解析、`strings.Split`、热路径 `fmt.Sprintf` 与字符串转换。 |
+| **响应零缓冲** | 不做响应侧检测，响应直接流式透传回客户端，省掉整块响应缓冲的内存与延迟。这也是砍掉响应检测换来的最大性能收益。 |
+| **热路径零分配** | 低核数下 GC 是主要 CPU 消耗。`BenchmarkEngine_NoMatch` 硬门禁 0 allocs/op，端到端 donothack 自身新增分配 ≤ 2 allocs/req。禁用 `net/url` 解析、`strings.Split`、热路径 `fmt.Sprintf` 与字符串转换。 |
 | RE2 | 全部正则走 Go 标准库，线性时间，天然免疫 ReDoS；禁止引入 PCRE。 |
 | sync.Pool | 事务对象、解码 buffer、变换输出、审计序列化 buffer、JSON 解析器状态全部池化，归还时 reset 且不持有 body 引用。 |
 | 原子规则集 | `atomic.Pointer` 无锁读取，reload 不影响在途请求。 |
 | 惰性解析 | 阶段 1 不解析请求体；没有阶段 2 规则时 body 完全不解码。 |
 | 惰性展开 | 同一 target 在一阶段内只展开一次。 |
-| 零拷贝 | 只读检测不复制 body；变换才产生新切片。body tee 必须实现并转发 `io.WriterTo`/`io.ReaderFrom`，保住 Linux splice 快路径。 |
-| 有界检查 | 请求体、响应体、连接数、参数个数、值长度、限速表容量、ring buffer 全部有上限，超限截断或淘汰并计数。**无界即漏洞。** |
+| 零拷贝 | 只读检测不复制 body；变换才产生新切片。请求体透传（未进检测的大 body）与响应转发必须转发 `io.WriterTo`/`io.ReaderFrom`，保住 Linux splice 快路径。 |
+| 有界检查 | 请求体、连接数、参数个数、值长度、限速表容量、ring buffer 全部有上限，超限截断或淘汰并计数。**无界即漏洞。** |
 | 连接与超时 | `MaxHeaderBytes` 压到 32 KiB，配 `ReadHeaderTimeout` / `ReadTimeout` / `WriteTimeout` / `IdleTimeout`，防慢速攻击吃光内存。 |
 | 连接复用 | 上游 `http.Transport` 按 profile 调优：`MaxIdleConnsPerHost`、`IdleConnTimeout`、`TCP_NODELAY`。 |
 | 快速路径 | 无请求体且无命中时，直接 `io.Copy` 转发，几乎零开销。 |
 | 透传豁免 | WebSocket、二进制 `Content-Type`、体积超限 → 直接隧道，不进检测。 |
-| 有界降级 | 过载时按 L1→L4 分级降级，状态必须体现在日志、指标与 `/readyz`；`block` 模式禁止静默降级。 |
+| 有界降级 | 过载时按 L1→L4 分级降级，状态必须体现在日志、指标与 `/readyz`；`block` 模式只允许 L1，L2 及以上返回 503。见 `PERFORMANCE.md` §8。 |
 
-### 15.3 容量目标（`small` profile，1 vCPU / 512 MiB，目标值待真机实测）
+### 15.3 容量目标（**`medium` 档为主目标，目标值待真机实测**）
+
+`medium`（2 vCPU / 2 GiB）：
 
 - 纯转发 GET：附加延迟 P50 < 0.15ms，P99 < 0.5ms
 - 1 KiB body + 全规则评估：P99 < 1.5ms
-- 吞吐 ≥ 3000 rps，相对直连下降 < 10%
-- 空载常驻 < 15 MiB，满负载 < 48 MiB，压测 30 分钟 RSS 稳定
+- 吞吐 ≥ 8000 rps，相对直连下降 < 10%
+- 空载常驻 < 25 MiB，满负载 < 120 MiB，压测 30 分钟 RSS 稳定
 - reload 期间零请求失败、零连接中断
 
-**这些是目标值，不是实测值。** 真机基线必须在他提供的 1 核 VPS 上跑一次才能确认，方法与脚本见 `PERFORMANCE.md` §10。
+`small`（1 vCPU / 512 MiB）作为保底线：≥ 3000 rps、满负载 < 48 MiB、P99 < 1.5ms。
+
+**这些是目标值，不是实测值。** 真机基线要在一台 2 核 2 GiB 的 VPS 上跑一次才能确认，方法与脚本见 `PERFORMANCE.md` §10。
 
 ### 15.4 明确取舍
 
-低配下放弃：响应体全量检测（`small` 只扫前 8 KiB 文本）、HTTP/2、PCRE 语义、超长值尾部深检测、payload 全量留存、多上游编排、分布式限速。逐条影响见 `PERFORMANCE.md` §9。
+不做响应侧检测（范围决定）、超长值尾部深检测、payload 全量留存、多上游编排、分布式限速；`small` 档再额外关 HTTP/2 并收紧请求体与连接上限。逐条影响见 `PERFORMANCE.md` §9。
 
 ---
 
@@ -795,10 +814,10 @@ wafd_go_goroutines / wafd_go_memstats_*              runtime
 | --- | --- | --- |
 | 单元 | 每个 transform / operator 表驱动，含边界与畸形输入 | `internal/*/*_test.go` |
 | 语料回归 | 每条规则配正样本（必拦）与负样本（必不拦） | `testdata/corpus/**` |
-| 端到端 | 起真实 wafd 进程 + `httptest` 假上游，走真实 HTTP | `test/e2e/` |
+| 端到端 | 起真实 donothack 进程 + `httptest` 假上游，走真实 HTTP | `test/e2e/` |
 | Fuzz | parser / transform / JSON / multipart 入口 | `*_fuzz_test.go`，CI 跑 60s |
 | 基准 | 引擎吞吐、解析开销、内存分配 | `*_bench_test.go` |
-| 压测 | wrk / hey 对比直连与经过 wafd | `scripts/bench.ps1`，报告进 `docs/bench/` |
+| 压测 | wrk / hey 对比直连与经过 donothack | `scripts/bench.ps1`，报告进 `docs/bench/` |
 | 自测门禁 | 内置语料，热加载前必跑 | `internal/rules/selftest.go` |
 
 ### 17.2 语料组织
@@ -811,7 +830,7 @@ testdata/corpus/
   xss/ rce/ lfi/ rfi/ webshell/ scanner/ protocol/ upload/
 ```
 
-`.http` 文件格式：原始 HTTP 请求报文（可通过 `wafd test -r file.http` 离线跑）。
+`.http` 文件格式：原始 HTTP 请求报文（可通过 `donothack test -r file.http` 离线跑）。
 
 正负样本比例要求不低于 1:2，负样本里必须包含**真实业务流量摘录**（例如带单引号的英文文本、含 `<` `>` 的富文本、base64 图片数据的 JSON 字段）。这是控制误报的关键。
 
@@ -819,17 +838,17 @@ testdata/corpus/
 
 | 阶段 | 验收标准 |
 | --- | --- |
-| P0 | `wafd -c config.yaml` 起监听；profile 自动探测生效并打印内存预算表；`GOMEMLIMIT` / `GOGC` 按 profile 设置；并发连接上限、`MaxHeaderBytes`、读超时生效；curl 经其访问假上游返回一致内容；结构化访问日志；`/healthz` `/readyz`（含 profile 与预算详情）正常；SIGTERM 优雅停机不丢在途请求；`go vet ./...`、`go test ./...`、`gofmt -l` 全绿；`GOMAXPROCS=1` 下压测脚本能跑出对比表 |
+| P0 | `donothack -c config.yaml` 起监听；profile 自动探测生效并打印内存预算表；`GOMEMLIMIT` / `GOGC` 按 profile 设置；并发连接上限、`MaxHeaderBytes`、读超时生效；curl 经其访问假上游返回一致内容；结构化访问日志；`/healthz` `/readyz`（含 profile 与预算详情）正常；SIGTERM 优雅停机不丢在途请求；`go vet ./...`、`go test ./...`、`gofmt -l` 全绿；`GOMAXPROCS=1` 下压测脚本能跑出对比表 |
 | P1 | 路径规范化与解码链单测全过；`BenchmarkParseQuery` 达到 0 allocs/op；fuzz 60s 无 crash；畸形请求（超长 URI、非法 %转义、截断 multipart、深层 JSON、解压炸弹）全部 fail-open 且审计有记录；各类上限超限行为符合 `PERFORMANCE.md` §5.2 表 |
-| P2 | DSL 能加载并编译；regex / pm / contains / detectSQLi / detectXSS 算子可用；**变换链去重与共享 AC 预筛生效**（启动日志打印不同链数量与自动机规模）；`BenchmarkEngine_NoMatch` 达到 0 allocs/op；阶段 1/2 生效；语料回归跑通；`wafd test -r` 可用 |
-| P3 | 评分与阈值生效；detect/block 模式可热切；限速与临时封禁生效且状态表容量上限可验证（伪造 IP 喷洒不涨内存）；白名单不误伤；`small` profile 压测达标（P99 < 0.5ms 纯转发、吞吐降幅 < 10%、满负载 RSS < 48 MiB）；L1–L4 降级可用且状态可见 |
-| P4 | 响应侧检测生效；零停机 reload（含失败回滚）验证通过；指标齐全；审计轮转正常；管理 API 鉴权生效 |
-| P5 | 内置规则集覆盖 SQLi/XSS/RCE/LFI/RFI/webshell/扫描器/协议/上传，每条有正负样本；误报治理报告产出；压测报告与运维文档齐 |
+| P2 | DSL 能加载并编译；regex / pm / contains / detectSQLi / detectXSS 算子可用；**变换链去重与共享 AC 预筛生效**（启动日志打印不同链数量与自动机规模）；`BenchmarkEngine_NoMatch` 达到 0 allocs/op；阶段 1/2 生效；语料回归跑通；`donothack test -r` 可用 |
+| P3 | 评分与阈值生效；detect/block 模式可热切；限速与临时封禁生效且状态表容量上限可验证（伪造 IP 喷洒不涨内存）；白名单不误伤；`medium` profile 压测达标（P99 < 0.5ms 纯转发、吞吐降幅 < 10%、满负载 RSS < 120 MiB）且 `small` 保底线达标；L1–L4 降级可用且状态可见 |
+| P4 | 零停机 reload（含失败回滚与峰值内存校验）验证通过；指标齐全（含池命中率、降级级别）；审计轮转正常；管理 API 鉴权生效；TLS 开关与证书热加载可用（默认关）；明文 HTTP 与 XFF 还原链路验证通过 |
+| P5 | 内置规则集覆盖 SQLi/XSS/RCE/LFI/RFI/webshell/扫描器/协议/上传，每条有正负样本；误报治理报告产出；真机 2 核 2 GiB 基线报告与运维文档齐 |
 
 ### 17.4 从检测切拦截的判据（不是感觉，是数据）
 
 1. 检测模式在真实流量上跑满至少 7 天。
-2. 按 `wafd_rule_hits_total` 取每条规则的命中样本，人工复核。
+2. 按 `donothack_rule_hits_total` 取每条规则的命中样本，人工复核。
 3. 规则误报率 < 1%，且无一条误报影响业务功能。
 4. 该规则单独升级为拦截档（`mixed` 模式按类目控制），观察 24 小时。
 5. 全类目都达标后才切 `block`。
@@ -843,10 +862,11 @@ testdata/corpus/
 | `BenchmarkParseQuery` | 0 allocs/op | P1 |
 | `BenchmarkEngine_NoMatch` | 0 allocs/op，< 20µs/op | P2 |
 | `BenchmarkEngine_FullRules` | 候选规则数 < 10，< 45µs/op | P2 |
-| 端到端 wafd 自身新增分配 | ≤ 2 allocs/req | P2 起 |
-| `small` 纯转发附加延迟 | P99 < 0.5ms | P3 |
-| `small` 吞吐降幅 | < 10% | P3 |
-| `small` 空载 / 满负载 RSS | < 15 MiB / < 48 MiB | P3 |
+| 端到端 donothack 自身新增分配 | ≤ 2 allocs/req | P2 起 |
+| `medium` 纯转发附加延迟 | P99 < 0.5ms | P3 |
+| `medium` 吞吐降幅 | < 10% | P3 |
+| `medium` 空载 / 满负载 RSS | < 25 MiB / < 120 MiB | P3 |
+| `small` 保底线（吞吐 / RSS） | ≥ 3000 rps / < 48 MiB | P3 |
 | 30 分钟压测 RSS 增长 | 无单调增长 | P3 |
 | 并发连接上限生效 | 超限 503，内存不涨 | P3 |
 | reload 期间失败请求数 | 0 | P4 |
@@ -873,27 +893,27 @@ testdata/corpus/
 
 ### P2 规则引擎
 
-产出：`transform`、`operator`（regex / pm / contains / startsWith / eq / detectSQLi / detectXSS / entropy / luhn / ipMatch）、`rules`（YAML 加载、编译、索引、**变换链去重 + 共享 Aho-Corasick 预筛**）、`engine` 阶段 1/2、`wafd test -r`、`scripts/perf-gate.ps1`、`docs/RULES.md` 定稿。
+产出：`transform`、`operator`（regex / pm / contains / startsWith / eq / detectSQLi / detectXSS / entropy / luhn / ipMatch）、`rules`（YAML 加载、编译、索引、**变换链去重 + 共享 Aho-Corasick 预筛**）、`engine` 阶段 1/2、`donothack test -r`、`scripts/perf-gate.ps1`、`docs/RULES.md` 定稿。
 
 交付判据：规则能写、能加载、能命中、能离线自测、`BenchmarkEngine_NoMatch` 达到 0 allocs/op。
 
 ### P3 决策与防护动作
 
-产出：评分累积、模式切换、`actions`（block/log/tarpit/challenge/custom page）、`ratelimit`（令牌桶 + 滑动窗口 + 临时封禁 + **带容量上限与 LRU 淘汰的 memory store**）、**L1–L4 有界降级**、`realip` 严格信任链、压测脚本与 `small` profile 基线与报告。
+产出：评分累积、模式切换、`actions`（block/log/tarpit/challenge/custom page）、`ratelimit`（令牌桶 + 滑动窗口 + 临时封禁 + **带容量上限与 LRU 淘汰的 memory store**）、**L1–L4 有界降级**、`realip` 严格信任链、压测脚本与 `medium` 基线报告（附 `small` 保底线）。
 
-交付判据：`small` profile 压测达标、误报不炸、伪造源 IP 喷洒不打爆内存。
+交付判据：`medium` profile 压测达标、`small` 保底线达标、误报不炸、伪造源 IP 喷洒不打爆内存。
 
-### P4 响应侧与运维
+### P4 运维与可靠性
 
-产出：`audit`（JSON Lines + 轮转 + ring buffer + 有界队列丢弃计数）、`metrics`（含池命中率、降级级别、内存预算）、`admin`（reload / rules / rule-test / events / pprof 默认关）、`alert`、状态 3/4 规则、零停机 reload 与失败回滚、TLS 与证书热加载、h2/h2c（按 profile 开关）、Redis 限速后端（可选）。
+产出：`audit`（JSON Lines + 轮转 + ring buffer + 有界队列丢弃计数）、`metrics`（含池命中率、降级级别、内存预算）、`admin`（reload / rules / rule-test / events / pprof 默认关）、`alert`、零停机 reload 与失败回滚、TLS 与证书热加载（默认关）、h2 随 TLS 可选、Redis 限速后端（可选）。
 
-交付判据：reload 零失败请求且峰值内存符合预算表，指标齐全，探针正确，降级状态三处可见。
+交付判据：reload 零失败请求且峰值内存符合预算表，指标齐全，探针正确，降级状态三处可见，明文 HTTP + XFF 还原链路验证通过。
 
 ### P5 规则集与投产
 
-产出：全类目内置规则集（每条带正负样本）、误报治理报告、SecRules 兼容层（视情况）、运维手册（含 systemd / Docker / 低配调优）、**真机 1 核 VPS 性能基线与容量报告**、发布流程。
+产出：全类目内置规则集（每条带正负样本）、误报治理报告、SecRules 兼容层（视情况）、运维手册（含 systemd / Docker / 低配调优）、**真机 2 核 2 GiB 性能基线与容量报告（附 1 核 512 MiB 保底线数据）**、发布流程。
 
-交付判据：检测模式 7 天数据支撑，逐类目切拦截；`small` profile 在真实 VPS 上的基线与 `PERFORMANCE.md` §2 目标对齐（不达标就改实现或改目标，不允许留一张对不上的表）。
+交付判据：检测模式 7 天数据支撑，逐类目切拦截；真机基线与 `PERFORMANCE.md` §2 目标对齐（不达标就改实现或改目标，不允许留一张对不上的表）。
 
 ---
 
@@ -912,15 +932,16 @@ testdata/corpus/
 
 ## 20. 未决问题
 
-1. **模块路径与命名**：暂用 `donothack/waf`、二进制 `wafd`。要改趁早。
-2. **SecRules 兼容层范围**：全量兼容（含 `SecRuleUpdateTargetById`、链式规则 `chain`）工作量很大。建议先做"读取 CRS 规则的一个子集"（`SecRule` + `@rx`/`@pm`/`@detectSQLi` + `t:xxx` + `id:`/`msg:`/`severity:`），P5 再评估。
+1. **模块路径与命名**：已定 —— 产品与二进制都叫 `donothack`，Go 模块路径 `donothack`（裸路径，私有工具够用；若将来要 `go get` 再换成带域名的路径，是一次机械替换）。
+2. **SecRules 兼容层范围**：全量兼容（含 `SecRuleUpdateTargetById`、链式规则 `chain`）工作量很大。建议先做"读取 CRS 规则的一个子集"（`SecRule` + `@rx`/`@pm`/`@detectSQLi` + `t:xxx` + `id:`/`msg:`/`severity:`），P5 再评估。注意 CRS 里有大量响应侧规则（phase 3/4），本轮不实现。
 3. **libinjection 自研还是移植**：建议自研精简版（SQLi 词法状态机 + XSS 上下文识别），避免 CGO 与许可证问题。需要评估检测率是否够用。
 4. **多上游与服务发现**：P5 之后是否需要。
 5. **Redis 是否必须**：单副本部署时不需要。若确定多副本，P3 就要把 `Store` 接上，不要拖到上线前。
-6. **TLS 证书来源**：文件热加载 vs ACME 自动签发。建议先文件，ACME 后置。
+6. **TLS 证书来源**：明文 HTTP 是常见场景，TLS 默认关。需要时先做文件热加载，ACME 自动签发后置。
 7. **是否要 GUI**：不做。管理走 API + 命令行。
-8. **目标 VPS 的确切规格**（vCPU / 内存 / 架构 / 是否由 wafd 终结 TLS）：决定 `small` profile 的验收数字能不能落地。见 `docs/PERFORMANCE.md` §11。没有真机，§2 的目标值只能标注为"未经实测"。
-9. **`small` 档的两处默认值**：阶段 4 响应体检测默认关、审计日志走 stdout 交 journald。前者牺牲检测覆盖，后者要求机器有 systemd。见 `PERFORMANCE.md` §11。
+8. **响应侧检测是否永远不做**：本轮按需求收窄砍掉。若将来要加，代价见 §12，需要重新算性能预算。
+9. **限速/封禁是否保留**：需求只提了"识别请求里的攻击 payload"，限速属于附加能力。当前设计保留（成本低、不涉及响应缓冲），默认开。若不需要，可整模块关掉。
+10. **目标 VPS**：已定 2 核 2 GiB（`medium` 为目标档），1 核 512 MiB 为保底线。**仍需一台真机跑基线**，否则 §15.3 的数字只能标注"未经实测"。
 
 ---
 
@@ -946,14 +967,15 @@ Content-Type: application/json
 6. `detectSQLi` 算子判定命中，`detail: "sqli fingerprint: union select"`，`target: ARGS:user`。
 7. 类目 `sqli` 加 5 分，达到入站阈值 5。
 8. 裁决 block → 403 + `X-Request-ID`，不回显 payload。
-9. 审计 JSON 落盘，`wafd_rule_hits_total{rule_id="SQLI-942100"}` +1。
+9. 审计 JSON 落盘，`donothack_rule_hits_total{rule_id="SQLI-942100"}` +1。
 10. 上游从未收到这个请求。
 
 ## 附录 B：配置示例（初稿，P0 实现后对齐）
 
 ```yaml
-profile: small             # small | medium | large | auto（按 cgroup 探测；探测失败按 small）
-                           # 下面的数值是 small 档默认值，medium/large 见 docs/PERFORMANCE.md §1
+profile: medium            # small | medium | large | auto（按 cgroup 探测；探测失败按 medium）
+                           # 下面的数值是 medium 档默认值（目标机型 2 vCPU / 2 GiB）
+                           # small/large 见 docs/PERFORMANCE.md §1
 
 listen:
   addr: "0.0.0.0:8080"
@@ -962,34 +984,35 @@ listen:
   read_timeout: 15s
   write_timeout: 30s
   idle_timeout: 60s
-  max_conns: 256           # 并发连接上限（信号量，超限 503）
-  http2: false             # small 档默认关
+  max_conns: 1024          # 并发连接上限（信号量，超限 503）
+  http2: false             # 明文 HTTP 站用不上；启用 TLS 时可开
 
 upstream:
   url: "http://127.0.0.1:9000"
   dial_timeout: 5s
   response_header_timeout: 30s
-  max_idle_conns_per_host: 16
+  max_idle_conns_per_host: 64
   idle_conn_timeout: 30s
   tcp_nodelay: true
 
 tls:
-  enabled: false
+  enabled: false           # 默认关：站点可能就跑明文 HTTP
   cert_file: ""
   key_file: ""
   min_version: "1.2"
 
 real_ip:
   trusted_proxies: []      # 空 = 忽略 XFF，直接用对端
+                           # 明文站前面若有 nginx/CDN，必须填对，否则限速与封禁形同虚设
   header: "X-Forwarded-For"
 
 engine:
   mode: detect             # detect | block | mixed
   fail_mode: open          # open | closed
   degrade: auto            # auto | off —— 过载分级降级，见 docs/PERFORMANCE.md §8
-                           # block 模式下禁止自动降级到 L3/L4（宁可 503 也不静默放行）
+                           # block 模式下只允许 L1；L2 及以上拒绝降级并返回 503
   inbound_anomaly_threshold: 5
-  outbound_anomaly_threshold: 4
+  # outbound_anomaly_threshold 保留但不生效（本轮不做响应侧检测）
 
 rules:
   dir: "./rules"
@@ -998,8 +1021,7 @@ rules:
   self_test: true
 
 limits:
-  max_inspect_body: 131072      # 128 KiB（small）
-  max_inspect_response: 8192    # 8 KiB（small；阶段 4 默认关）
+  max_inspect_body: 524288      # 512 KiB（medium）
   max_uri_length: 8192
   max_headers: 100
   max_params: 1000
@@ -1007,10 +1029,10 @@ limits:
   max_json_depth: 32
   max_json_nodes: 10000
   max_transform_depth: 8
-  max_prefilter_literals: 20000
-  max_rules: 400
-  ratelimit_table_capacity: 8192   # 必须有上限，否则伪造源 IP 喷洒可打爆内存
-  ring_buffer_size: 256
+  max_prefilter_literals: 60000
+  max_rules: 2000
+  ratelimit_table_capacity: 65536   # 必须有上限，否则伪造源 IP 喷洒可打爆内存
+  ring_buffer_size: 1024
 
 ratelimit:
   enabled: true
@@ -1024,7 +1046,7 @@ ratelimit:
 log:
   level: info
   format: json
-  file: "./logs/wafd.jsonl"
+  file: "./logs/donothack.jsonl"
   max_size_mb: 100
   max_backups: 10
   capture_payload: false
@@ -1047,16 +1069,25 @@ alert:
 
 ## 附录 C：待确认清单（评审时逐条打勾）
 
-- [ ] 模块路径 `donothack/waf`、二进制名 `wafd` 是否可用
+已定（2026-10-06 评审）：
+
+- [x] 产品与二进制名 `donothack`，Go 模块路径 `donothack`
+- [x] 部署形态：独立反向代理
+- [x] 规则体系：自研 YAML DSL，预留 SecRules 兼容层
+- [x] 默认模式：`detect` 只记录不拦
+- [x] 目标机型：2 vCPU / 2 GiB（`medium` 为目标档），1 vCPU / 512 MiB 为保底线
+- [x] 检测范围：**只做请求侧**（请求头、请求体、参数），响应侧不做
+- [x] TLS 默认关（站点可能跑明文 HTTP）
+
+仍待确认：
+
 - [ ] 目录划分是否合理
-- [ ] §9.1 字面量预筛方案是否认可（这是性能关键，实现复杂度不低）
+- [ ] §9.1 变换链去重 + 共享预筛方案是否认可（性能关键，实现复杂度不低）
 - [ ] §10 评分阈值是否认可
-- [ ] §11 限速默认值是否认可
-- [ ] §12 响应侧检测范围是否认可
-- [ ] §15 性能目标与 profile 分级是否认可（`small` = 1 vCPU / 512 MiB 是最低支持线，见 `docs/PERFORMANCE.md`）
-- [ ] §17.5 性能门禁（0 allocs/op 等硬指标）是否认可 —— 这些会让开发速度变慢，但低配下省不掉
-- [ ] `small` 档的取舍：阶段 4 默认关、HTTP/2 默认关、超长值只扫前 8 KiB，是否接受
-- [ ] 过载降级策略：`small` 默认 `auto`、`block` 模式禁止降级到 L3/L4，是否认可
-- [ ] 目标 VPS 规格与是否提供真机做基线测量
+- [ ] §11 限速默认值是否认可，以及限速/封禁是否要保留（需求只提了 payload 识别，限速属附加）
+- [ ] §15 性能目标与 profile 分级是否认可
+- [ ] §17.5 性能门禁（0 allocs/op 等硬指标）是否认可 —— 这些会让开发速度变慢，但低核数下省不掉
+- [ ] 过载降级策略：默认 `auto`、`block` 模式只允许 L1（L2+ 返回 503），是否认可
+- [ ] 是否提供真机（2 核 2 GiB）跑一次基线，否则目标值只能标注"未经实测"
 - [ ] §18 阶段划分与顺序是否认可（P0 骨架是否过轻）
 - [ ] §20 未决问题逐条定调

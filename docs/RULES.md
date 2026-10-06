@@ -27,7 +27,7 @@ rules/
   40-rce.yaml          命令注入 / 代码执行
   50-lfi.yaml          路径穿越 / 文件包含
   60-webshell.yaml     Webshell 上传与访问
-  70-leakage.yaml      响应侧敏感数据泄露
+  70-leakage.yaml      响应侧敏感数据泄露 —— **本轮不提供**（不做响应侧检测，见 docs/DESIGN.md §12）
   90-exceptions.yaml   白名单与例外
 ```
 
@@ -105,7 +105,7 @@ rules:
 | --- | --- | --- | --- | --- |
 | `id` | string | 是 | — | 全局唯一。命名规范见 §9.1。 |
 | `enabled` | bool | 否 | `true` | 关闭后进规则集但不执行，仍可在自测中看到。 |
-| `phase` | int | 是 | — | 1/2/3/4。5 为保留的收尾阶段，不可写规则。 |
+| `phase` | int | 是 | — | **本轮只支持 1 和 2**（请求头 / 请求体与参数）。3/4 为响应侧，保留但未实现；5 为收尾阶段，不可写规则。 |
 | `severity` | enum | 是 | — | `critical` / `high` / `medium` / `low` / `info`。 |
 | `category` | string | 是 | 继承 `meta` | 决定加多少分（见 `scoring.categories`）。 |
 | `score` | int | 否 | 取类目默认分 | 本条规则的加分数，可覆盖类目默认。 |
@@ -117,7 +117,7 @@ rules:
 | `action` | object | 否 | 继承模式默认 | 命中动作覆盖，见 §4.3。 |
 | `hard_block` | bool | 否 | `false` | true = 命中即终止本阶段剩余规则并立即拦截，不看分数。 |
 | `chain` | bool | 否 | `false` | 链式规则：本条命中才评估下一条（用于"参数里同时出现 A 和 B"）。 |
-| `test` | object | 否 | — | 内置正负样本，参与自测与 `wafd rules test`。**新规则必填。** |
+| `test` | object | 否 | — | 内置正负样本，参与自测与 `donothack rules test`。**新规则必填。** |
 
 ### 4.3 `action`
 
@@ -169,14 +169,16 @@ action:
 | `REMOTE_ADDR` | 真实客户端 IP |
 | `TX` | 事务级临时变量（供链式规则传递） |
 
-**响应侧**（阶段 3/4）
+**响应侧**（**本轮未实现**，见 `docs/DESIGN.md` §12）
 
-| 集合 | 内容 |
-| --- | --- |
-| `RESPONSE_STATUS` | 状态码 |
-| `RESPONSE_HEADERS` | 响应头 |
-| `RESPONSE_BODY` | 响应体 |
-| `RESPONSE_CONTENT_TYPE` | Content-Type |
+donothack 本轮只做请求侧检测，以下集合在解析层不会装填。名称保留是为了将来若恢复响应检测时规则无需改写；**写针对这些集合的规则在加载期会被拒绝并给出明确报错**（不允许写一条永远不生效的规则）。
+
+| 集合 | 内容 | 状态 |
+| --- | --- | --- |
+| `RESPONSE_STATUS` | 状态码 | 未实现 |
+| `RESPONSE_HEADERS` | 响应头 | 未实现 |
+| `RESPONSE_BODY` | 响应体 | 未实现 |
+| `RESPONSE_CONTENT_TYPE` | Content-Type | 未实现 |
 
 **派生**
 
@@ -408,7 +410,7 @@ message: "命中注入: 1' union select 1,2--"
 
 ## 10. 校验与离线测试
 
-### 10.1 加载期校验（`wafd` 启动与 reload 时）
+### 10.1 加载期校验（`donothack` 启动与 reload 时）
 
 1. YAML 语法。
 2. 必填字段齐全。
@@ -432,24 +434,24 @@ message: "命中注入: 1' union select 1,2--"
 
 ```bash
 # 校验规则集（不启动服务）
-wafd rules check -d ./rules
+donothack rules check -d ./rules
 
 # 跑全部内置样本，输出矩阵
-wafd rules test -d ./rules
+donothack rules test -d ./rules
 
 # 用一条真实原始请求离线跑规则，看命中链路
-wafd test -r testdata/req/sqli-json.http -d ./rules
+donothack test -r testdata/req/sqli-json.http -d ./rules
 
 # 单条规则即时验证（调整规则时最快）
-wafd rules eval -d ./rules \
+donothack rules eval -d ./rules \
   --rule SQLI-942100 \
   --value "1' union/**/select 1,2--"
 
 # 输出命中的变换后值与算子明细（调误报时用）
-wafd test -r req.http -d ./rules -v
+donothack test -r req.http -d ./rules -v
 ```
 
-`wafd test -r` 输出示例：
+`donothack test -r` 输出示例：
 
 ```
 tx: offline
@@ -477,7 +479,7 @@ verdict: BLOCK (threshold 5, mode block)
 | `@contains` / `@streq` / `@beginsWith` | 对应算子 |
 | `t:lowercase` 等 | `transforms` |
 | `id:` / `msg:` / `severity:` / `tag:` | 对应字段 |
-| `phase:1..4` | `phase` |
+| `phase:1..4` | `phase`（3/4 响应侧本轮不实现，遇到即报错退出） |
 | `SecAction` / `setvar` 分数操作 | **不支持**（CRS 的评分体系与自己不同，强行映射会出隐性错误） |
 | `chain` | 支持（映射为本 DSL 的 `chain`） |
 | `SecRuleUpdateTargetById` | 支持 |

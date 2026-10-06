@@ -1,3 +1,3 @@
-module donothack/waf
+module donothack
 
 go 1.27
