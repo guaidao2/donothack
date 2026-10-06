@@ -284,6 +284,9 @@ type AccessRecord struct {
 	Profile    string  `json:"profile"`
 	Verdict    string  `json:"verdict"`
 	Error      string  `json:"error,omitempty"`
+	// 命中信息只在有命中时出现：让"被拦了什么"在访问日志里一眼可见。
+	RuleID string `json:"rule_id,omitempty"`
+	Score  int    `json:"score,omitempty"`
 }
 
 // shouldWrite 决定这条访问记录要不要落盘。
@@ -346,6 +349,8 @@ type Recorder struct {
 	UpstreamMs float64
 	Verdict    string
 	Err        string
+	RuleID     string
+	Score      int
 }
 
 type recorderKey struct{}

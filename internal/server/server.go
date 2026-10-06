@@ -32,8 +32,10 @@ type Options struct {
 	Detection     profile.Detection
 	MemLimit      int64 // 实际设置的 GOMEMLIMIT（字节，0 表示未设置）
 	Logger        *audit.Logger
-	Next          http.Handler // 数据面处理器（P0 = proxy）
+	Next          http.Handler // 数据面处理器（引擎 + 代理）
 	Version       string
+	// Ruleset 是规则集摘要（版本、条数），进 /readyz，方便确认"到底加载了哪些规则"。
+	Ruleset string
 }
 
 // Server 是数据面服务器。
@@ -179,6 +181,8 @@ func (s *Server) instrument(next http.Handler) http.Handler {
 			Profile:    string(s.o.ProfileName),
 			Verdict:    rec.Verdict,
 			Error:      rec.Err,
+			RuleID:     rec.RuleID,
+			Score:      rec.Score,
 		})
 	})
 }
@@ -267,9 +271,8 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		MaxConns:        s.o.Config.Listen.MaxConns,
 		Inflight:        s.inflight.Load(),
 		RejectedTotal:   s.rejected.Load(),
-		// 规则集要到 P2 才有。这里如实说明，不假装就绪。
-		Ruleset:       "not-implemented-until-P2（P0 只做转发，不做检测）",
-		UptimeSeconds: round2(time.Since(s.startedAt).Seconds()),
+		Ruleset:         s.o.Ruleset,
+		UptimeSeconds:   round2(time.Since(s.startedAt).Seconds()),
 	}
 
 	healthy := ok && s.ready.Load()

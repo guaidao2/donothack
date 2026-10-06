@@ -66,26 +66,35 @@ func New(patterns []Pattern) *Matcher {
 	return m
 }
 
+// addEdge 从 from 沿 c 找/建一条边。
+//
+// **这里有个必须小心的点**：m.nodes 的 append 可能重新分配底层数组，
+// 所以绝不能在 append 前后持有 *node 指针 —— 那会写到已经废弃的旧数组上，
+// 新边直接丢失，表现为"某些模式永远匹配不上"，而且极难查。
+// 因此全部按索引访问，每次 append 之后重新取一遍。
 func (m *Matcher) addEdge(from int32, c byte) int32 {
-	n := &m.nodes[from]
-	// 线性查找（出边少）
-	for i := range n.next {
-		if n.next[i].ch == c {
-			return n.next[i].next
+	next := m.nodes[from].next
+	for i := range next {
+		if next[i].ch == c {
+			return next[i].next
 		}
-		if n.next[i].ch > c {
-			// 插入保持有序
+		if next[i].ch > c {
+			// 插入中间，保持出边有序（有序才能用线性/二分查找）
 			id := int32(len(m.nodes))
-			m.nodes = append(m.nodes, node{fail: 0, dictLink: -1})
-			n.next = append(n.next, edge{})
-			copy(n.next[i+1:], n.next[i:])
-			n.next[i] = edge{ch: c, next: id}
+			m.nodes = append(m.nodes, node{dictLink: -1})
+			nb := m.nodes[from].next
+			nb = append(nb, edge{})
+			copy(nb[i+1:], nb[i:])
+			nb[i] = edge{ch: c, next: id}
+			m.nodes[from].next = nb
 			return id
 		}
 	}
 	id := int32(len(m.nodes))
-	m.nodes = append(m.nodes, node{fail: 0, dictLink: -1})
-	n.next = append(n.next, edge{ch: c, next: id})
+	m.nodes = append(m.nodes, node{dictLink: -1})
+	nb := m.nodes[from].next
+	nb = append(nb, edge{ch: c, next: id})
+	m.nodes[from].next = nb
 	return id
 }
 

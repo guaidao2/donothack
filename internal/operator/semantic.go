@@ -123,6 +123,9 @@ func sqliFingerprint(in []byte, minLen int) string {
 
 	// 2) 需要引号上下文的特征
 	if hasQuote {
+		if subqueryFingerprint(s) {
+			return "subquery in boolean context"
+		}
 		if quoteThenComment(s) {
 			return "quote + comment"
 		}
@@ -133,6 +136,11 @@ func sqliFingerprint(in []byte, minLen int) string {
 
 	// 3) 弱特征：只在输入足够长时才认（避免 "1=1" 这类短文本误报）
 	if len(s) >= minLen {
+		// "and (select ...)" 这种子查询注入形态在正常文案里不会出现，
+		// 所以没有引号也认。crackweb 的布尔/联合注入就会走这条。
+		if subqueryFingerprint(s) {
+			return "subquery in boolean context"
+		}
 		if tautology(s) {
 			return "boolean tautology"
 		}
@@ -141,6 +149,34 @@ func sqliFingerprint(in []byte, minLen int) string {
 		}
 	}
 	return ""
+}
+
+// subqueryFingerprint 识别 "and (select ...)" / "or (select ...)" 形态。
+//
+// 这是自测抓出来的真实缺口：`1' and (select count(*) from users)>0--`
+// 在去掉注释之后既没有恒真比较、也没有 union，原来的指纹漏掉了它。
+func subqueryFingerprint(s string) bool {
+	for _, kw := range []string{"and (", "or (", "and(", "or(", "&&(", "||("} {
+		idx := 0
+		for {
+			i := strings.Index(s[idx:], kw)
+			if i < 0 {
+				break
+			}
+			rest := s[idx+i+len(kw):]
+			if len(rest) > 32 {
+				rest = rest[:32]
+			}
+			if strings.Contains(rest, "select") || strings.Contains(rest, "case when") {
+				return true
+			}
+			idx += i + len(kw)
+			if idx >= len(s) {
+				break
+			}
+		}
+	}
+	return false
 }
 
 func tautology(s string) bool {
