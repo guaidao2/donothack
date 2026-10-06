@@ -8,11 +8,12 @@
 
 ## 当前状态
 
-**设计阶段，代码尚未开始。** 仓库里目前只有设计文档。
+**P0 已完成**（tag `v0.1.0-mvp`）：能跑、能转发、能停、有性能地基与可重复的验收手段。
+**尚无任何检测能力** —— 检测引擎从 P1（解析层）开始。
 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
-| P0 | 骨架：配置、profile 探测、纯转发代理、访问日志、健康探针、优雅停机 | 未开始 |
+| P0 | 骨架：配置、profile 探测与内存预算、GC 控制、纯转发代理、访问日志、健康探针、优雅停机、压测与保真度脚本 | **已完成（`v0.1.0-mvp`）** |
 | P1 | 解析层：路径规范化、解码链、参数提取、上限控制 | 未开始 |
 | P2 | 规则引擎：DSL、变换、算子、变换链去重与共享预筛 | 未开始 |
 | P3 | 决策：评分、模式切换、拦截动作、限速封禁、真实 IP、有界降级 | 未开始 |
@@ -20,6 +21,21 @@
 | P5 | **Web 控制台**：八个页面、原生 ES module SPA、embed 内嵌 | 未开始 |
 | P6 | 规则集、误报治理、真机压测基线、SecRules 兼容层评估 | 未开始 |
 | P7 | 多站点（雷池式）：Host 路由、站点级规则与证书 | 后置 |
+
+### P0 实测（本机 Windows，24 核 / 16 GiB，32 并发，8 秒，medium 档）
+
+| 指标 | 直连上游 | 裸反向代理 | donothack |
+| --- | --- | --- | --- |
+| RPS | 84272 | 26122 | 28817 |
+| P99 | 1.61ms | 3.28ms | 2.74ms |
+| RSS | — | — | 29.6 MiB |
+
+裸反向代理（`cmd/plainproxy`）才是公平基线：直连是一跳、过 WAF 是两跳。
+相对裸代理的开销落在测量噪声内 —— **这是应该的，因为 P0 还没有检测逻辑**。
+检测引入后的真实开销从 P2 开始才有意义。报告见 `docs/bench/`。
+
+透传保真度：对真实站点（7 个请求，含 404、静态资源、带 query 的 GET、表单 POST）
+逐项比对状态码、响应体哈希、Content-Type 与响应头，**全部一致**。
 
 ## 文档
 
@@ -59,7 +75,7 @@
 
 - 纯转发 GET：附加延迟 P50 < 0.15ms，P99 < 0.5ms
 - 1 KiB body + 全规则评估：P99 < 1.5ms
-- 吞吐 ≥ 8000 rps，相对直连上游下降 < 10%
+- 吞吐 ≥ 8000 rps，**相对裸反向代理**降幅 < 10%（相对直连的降幅只作参考）
 - 空载常驻 < 25 MiB，满负载 < 120 MiB，压测 30 分钟 RSS 稳定
 - reload 期间零失败请求
 
@@ -68,18 +84,26 @@
 ## 开发约定
 
 ```bash
-# 提交前必须全绿
-gofmt -l .          # 必须无输出
-go vet ./...
-go test ./...
+# 提交前必须全绿（格式 + vet + 测试 + 前端 DOM 写入禁令）
+python scripts/lint.py
 
-# 性能门禁（分配数、延迟、吞吐、内存），超标非零退出
-pwsh ./scripts/perf-gate.ps1
+# 端到端压测：直连 / 裸反向代理 / donothack 三者对比，报告写入 docs/bench/
+python scripts/bench.py --profile medium --duration 20s --concurrency 64
+
+# 透传保真度：确认代理没有改动上游语义（P1 起每次改解析层都要跑）
+python scripts/passthrough.py --direct http://127.0.0.1:8787 --waf http://127.0.0.1:18080
 
 # 跨平台编译（无 CGO；GOAMD64 必须是 v1，低配 VPS 的 CPU 常不支持 AVX2）
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v1 \
   go build -trimpath -ldflags="-s -w" -o dist/donothack-linux-amd64 ./cmd/donothack
+
+# 看看当前档位与内存预算表
+./dist/donothack -c config.example.yaml -print-budget
 ```
+
+脚本用 Python 而不是 PowerShell：Windows PowerShell 5.1 缺一堆语法
+（`??`、`$IsWindows`、递归 `Select-String`），Python 一套脚本在 Windows 与低配
+Linux VPS 上行为一致。
 
 Git 工作流见 `docs/DESIGN.md` §19：`main` 只接全绿的提交，功能走 `feat/<阶段>-<模块>` 分支，每个里程碑打 tag，回滚用 `git checkout <tag>`。
 

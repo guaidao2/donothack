@@ -65,7 +65,17 @@
 | 1 KiB body + 全规则评估，无命中 | 附加延迟 P99 < 1.5ms |
 | 命中拦截（不转发上游） | P99 < 1ms |
 | 吞吐（1 KiB GET，keep-alive，2 核） | ≥ 8000 rps |
-| 吞吐下降（相对直连上游） | < 10% |
+| **相对裸反向代理**的吞吐降幅 | < 10% |
+| 相对直连上游的吞吐降幅 | 仅记录作参考，**不作为门禁** |
+
+> **为什么基线必须是"裸反向代理"而不是"直连上游"：**
+> 直连是一跳 HTTP，经过 WAF 是两跳。同一台机器上两跳的吞吐天然接近腰斩 ——
+> 拿直连当基线，量到的是"多了一跳代理"，不是"WAF 慢"。
+> 因此 `scripts/bench.py` 会跑三次：直连（参考）、`cmd/plainproxy` 裸代理（公平基线）、
+> donothack。**开门禁的只有最后一个对比。**
+> 本机实测印证了这一点：medium 档下直连 84000 rps、裸代理 26000 rps、
+> donothack 29000 rps —— 相对直连掉 66%，但相对裸代理是 -10%（即更快）。
+> 那不是"我们比裸代理快"，是 P0 还没有检测逻辑，差值落在测量噪声里。
 | 空载常驻内存 | < 25 MiB |
 | 满负载内存 | < 120 MiB |
 | 压测 30 分钟后 RSS | 稳定，无单调增长 |
@@ -372,15 +382,32 @@ BenchmarkProxyPassthrough      ≤ 2 allocs/op（donothack 自身）
 
 ### 10.2 端到端
 
-`scripts/bench.ps1`（Windows）/ `scripts/bench.sh`（Linux）：
+`scripts/bench.py`（Python，跨平台；不依赖 hey / wrk / psutil）：
 
-1. 起 `httptest` 假上游（固定 200 + 1 KiB body）。
-2. 起 donothack（指定 profile）。
-3. 用 `hey` 或 `wrk` 分别压直连上游与经过 donothack，压 60s。
-4. 采集 RPS、P50/P90/P99、donothack RSS、CPU 占用、GC 次数（`/metrics` 或 `runtime/metrics`）。
-5. 输出对比表，写入 `docs/bench/<tag>-<profile>.md`。
+1. 编译 `cmd/donothack`、`cmd/loadgen`、`cmd/testupstream`、`cmd/plainproxy`。
+2. 起 `testupstream`（固定 200 + 1 KiB body）作为假上游。
+3. 压**直连上游** → 参考值。
+4. 起 `cmd/plainproxy`（同样的反向代理与 Transport 调优，但**不做检测**）→ **公平基线**。
+5. 起 donothack（指定 profile），压它。
+6. 采集 RPS、P50/P90/P99、donothack RSS（Windows 用 `tasklist`，Linux 读 `/proc/<pid>/status`）。
+7. 输出三列对比与 **WAF 开销**（donothack 相对裸代理），报告写入 `docs/bench/<时间戳>-<profile>.md`。
+
+`cmd/loadgen` 是自带的压测器（只用标准库）——低配机器上装不了 hey / wrk 时，
+交叉编译一个丢过去就能出数。
 
 **报告进版本库，原始数据不进**（`.gitignore` 已排除）。
+
+### 10.2b 透传保真度（功能门禁，P1 起每次必跑）
+
+`scripts/passthrough.py`：把同一批请求分别打"直连上游"与"经过 donothack"，
+逐项比对状态码、响应体长度、响应体哈希、Content-Type 与响应头。
+
+WAF 是透明代理，**任何**对上游语义的改动都是 bug（路径被重新编码、Content-Length 变了、
+响应头丢了一个）。这个脚本把这类回归变成一次可重复的检查。也可以直接拿真实站点当上游：
+
+```
+python scripts/passthrough.py --direct http://127.0.0.1:8787 --waf http://127.0.0.1:18080
+```
 
 ### 10.3 受限环境模拟
 
@@ -405,7 +432,7 @@ systemd-run --scope -p MemoryMax=1280M -p MemoryHigh=1024M -p CPUQuota=200% \
 **诚实说明**：`GOMAXPROCS` 能模拟核数下的调度行为，`GOMEMLIMIT` 能模拟内存压力，但**模拟不出真实 VPS 的 CPU 型号、磁盘 IO 与网络栈**。最终数字必须在真机（2 核 2 GiB）上跑一次才算数，跑法：
 
 ```bash
-curl -sSL <仓库>/scripts/bench.sh | bash -s -- --profile medium --duration 60
+curl -sSL <仓库>/scripts/bench.py | bash -s -- --profile medium --duration 60
 ```
 
 结果贴回仓库 `docs/bench/`，作为该 profile 的基线。

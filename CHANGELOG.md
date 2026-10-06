@@ -70,7 +70,7 @@
   - 明确写清：门槛**不是安全边界**，不能当认证用；认证也不能替代门槛，否则探测流量淹没日志、暴力破解尝试次数充足。
 - **payload 展示改为「绝对代码模式」**（`CONSOLE.md` §3.4）：payload 必须看得见，否则没法判断误报；但绝不作为内容参与 HTML 渲染。
   - 一律 `<pre><code>` + `textContent`，封装唯一原语 `renderCode`。
-  - **全前端禁用** `innerHTML` / `outerHTML` / `insertAdjacentHTML` / `document.write` / `eval` / `new Function`，CI 门禁 `scripts/lint-no-innerhtml.ps1` 卡死；开发模式运行时改写 `innerHTML` 为抛错。
+  - **全前端禁用** `innerHTML` / `outerHTML` / `insertAdjacentHTML` / `document.write` / `eval` / `new Function`，CI 门禁 `scripts/lint.py` 卡死；开发模式运行时改写 `innerHTML` 为抛错。
   - **不引第三方 markdown 库**；自研极小 markdown 子集（代码块/表格/粗体/换行），不支持链接、图片、raw HTML。
   - 服务端先做可打印化（控制字符转 `\xNN`，UTF-8 边界截断 4 KiB），前端再 `textContent`，双层防护。
   - 列表页只显示摘要，详情页展开代码块（变换前后对比），另提供"下载原始字节"取证。
@@ -90,9 +90,36 @@
 - 诚实写明该方案的固有代价：401 本身告诉扫描器"这个端口有 HTTP 认证服务"，换来的是登录页/路径/API/产品指纹全不暴露。
 - `DESIGN.md` 附录 B 的 `admin` 配置同步（新增 `admin.gate` 与 `admin.tls` 段、`realm`、`exempt_api_token`）；附录 C 与 §20 同步定稿。
 
+### 新增（P0 骨架，tag `v0.1.0-mvp`）
+
+- **可运行的转发骨架**：`cmd/donothack`（加载配置 → 探测档位 → 设置 GC → 打印内存预算 → 反向代理 → 优雅停机）。
+- `internal/config`：完整配置结构（对应 DESIGN 附录 B）、未知字段报错、`5s` / `512KiB` 这类人类可读写法、严格校验。
+  **档位是上限的唯一来源**：没显式写的项由 profile 填充，`profile: small` 不会继承 medium 的连接上限。
+- `internal/profile`：按 cgroup v2 → cgroup v1 → `/proc/meminfo` → 平台兜底（Windows `GlobalMemoryStatusEx`）探测，
+  按 `NumCPU` 与内存选档并打印来源；生成内存预算表，校验"连接数 × 每连接预算 + 规则集 + 池 < 可用内存 60%"这条硬约束。
+- `internal/proxy`：零缓冲流式转发（不做响应检测，因此不需要 body tee）；上游不可达返回 502，**绝不静默直连**；
+  不信任 XFF（严格信任链留到 P3）；清掉上游回显的 `X-Request-ID`，保证客户端只看到一个值。
+- `internal/server`：`MaxHeaderBytes` 压到 32 KiB、读/写/空闲超时、并发连接信号量（超限 503 + `Retry-After`）、
+  `/healthz`、`/readyz`（暴露档位来源、预算、上游 DNS 可达性、在途与拒绝计数）、优雅停机 drain 在途请求、
+  访问日志只记业务请求（探针不刷日志）。
+- `internal/audit`：应用日志与访问/审计日志**分开输出**（前者 stderr，后者 stdout 或文件），两者共用一把写锁，避免行交错。
+- 开发工具（不随发布产物分发）：`cmd/loadgen`（只用标准库的压测器）、`cmd/testupstream`（假上游）、
+  `cmd/plainproxy`（**裸反向代理，公平性能基线**）。
+- `scripts/lint.py` 门禁、`scripts/bench.py` 压测、`scripts/passthrough.py` 透传保真度检查；
+  `Makefile`（钉死 `GOAMD64=v1`）、`deploy/donothack.service`、`config.example.yaml`。
+
+### 修正
+
+- **性能基线判据修正**：原写"吞吐相对直连上游下降 < 10%"，这条**不公平** —— 直连是一跳、过 WAF 是两跳，
+  同一台机器上量到的是"多了一跳代理"，不是"WAF 慢"。改为**相对裸反向代理**（`cmd/plainproxy`）比较。
+  本机实测印证：medium 档直连 84272 rps、裸代理 26122 rps、donothack 28817 rps —— 相对直连掉 66%，
+  相对裸代理是 -10%（落在噪声内，因为 P0 还没有检测逻辑）。
+- 脚本从 PowerShell 换成 Python：Windows PowerShell 5.1 缺 `??`、`$IsWindows`、递归 `Select-String`，
+  且默认编码是 GBK（中文输出与 UTF-8 子进程输出都会解码失败）。Python 一套脚本跨平台。
+
 ### 状态
 
-设计与文档阶段，尚无实现代码。下一步 P0（骨架，含 profile 探测与性能地基）。
+P0 完成。下一步 P1（解析层：路径规范化、解码链、参数提取、上限控制）。
 
 ---
 

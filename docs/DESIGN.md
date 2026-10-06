@@ -21,7 +21,7 @@
 | 可运维 | **必须有 Web 控制台**（对标雷池）：浏览器里看攻击、查事件、启停规则、加白名单、调限速、改配置、看操作审计。设计与安全要求见 `docs/CONSOLE.md`。 |
 | 单二进制 | 纯 Go，无 CGO，`CGO_ENABLED=0` 交叉编译，不依赖 nginx / Apache / Lua / PCRE 动态库。 |
 | **低配 VPS 能跑** | **首要约束。** 目标机型 2 vCPU / 2 GiB（`medium` 档），最低支持 1 vCPU / 512 MiB（`small` 档）。预算见 `docs/PERFORMANCE.md`。 |
-| 低开销 | 无命中路径附加延迟 P99 < 0.5ms，吞吐相对直连下降 < 10%。热路径零分配，见 `docs/PERFORMANCE.md`。 |
+| 低开销 | 无命中路径附加延迟 P99 < 0.5ms，**相对裸反向代理**吞吐降幅 < 10%。热路径零分配，见 `docs/PERFORMANCE.md` §2.1。 |
 | 不成为单点故障 | 任何解析或规则异常都必须 fail-open 放行并留审计，绝不因为 WAF 自身错误导致业务 5xx。 |
 | 可对照回滚 | 规则、配置、代码全部进 git，每次决策可追溯到规则 ID 与规则文件版本。 |
 | 规则可读可写 | 自研 YAML DSL，安全工程师不需要写 Go 就能加规则；预留 ModSecurity SecRules 兼容层。 |
@@ -784,7 +784,7 @@ donothack_go_goroutines / donothack_go_memstats_*              runtime
 
 - 纯转发 GET：附加延迟 P50 < 0.15ms，P99 < 0.5ms
 - 1 KiB body + 全规则评估：P99 < 1.5ms
-- 吞吐 ≥ 8000 rps，相对直连下降 < 10%
+- 吞吐 ≥ 8000 rps，**相对裸反向代理**降幅 < 10%（相对直连的降幅只作参考，见 PERFORMANCE §2.1 说明）
 - 空载常驻 < 25 MiB，满负载 < 120 MiB，压测 30 分钟 RSS 稳定
 - reload 期间零请求失败、零连接中断
 
@@ -830,7 +830,7 @@ donothack_go_goroutines / donothack_go_memstats_*              runtime
 | 端到端 | 起真实 donothack 进程 + `httptest` 假上游，走真实 HTTP | `test/e2e/` |
 | Fuzz | parser / transform / JSON / multipart 入口 | `*_fuzz_test.go`，CI 跑 60s |
 | 基准 | 引擎吞吐、解析开销、内存分配 | `*_bench_test.go` |
-| 压测 | wrk / hey 对比直连与经过 donothack | `scripts/bench.ps1`，报告进 `docs/bench/` |
+| 压测 | 直连 / 裸反向代理 / donothack 三者对比（自带 `cmd/loadgen`，不依赖 hey、wrk） | `scripts/bench.py`，报告进 `docs/bench/` |
 | 自测门禁 | 内置语料，热加载前必跑 | `internal/rules/selftest.go` |
 
 ### 17.2 语料组织
@@ -854,7 +854,7 @@ testdata/corpus/
 | P0 | `donothack -c config.yaml` 起监听；profile 自动探测生效并打印内存预算表；`GOMEMLIMIT` / `GOGC` 按 profile 设置；并发连接上限、`MaxHeaderBytes`、读超时生效；curl 经其访问假上游返回一致内容；结构化访问日志；`/healthz` `/readyz`（含 profile 与预算详情）正常；SIGTERM 优雅停机不丢在途请求；`go vet ./...`、`go test ./...`、`gofmt -l` 全绿；`GOMAXPROCS=1` 下压测脚本能跑出对比表 |
 | P1 | 路径规范化与解码链单测全过；`BenchmarkParseQuery` 达到 0 allocs/op；fuzz 60s 无 crash；畸形请求（超长 URI、非法 %转义、截断 multipart、深层 JSON、解压炸弹）全部 fail-open 且审计有记录；各类上限超限行为符合 `PERFORMANCE.md` §5.2 表 |
 | P2 | DSL 能加载并编译；regex / pm / contains / detectSQLi / detectXSS 算子可用；**变换链去重与共享 AC 预筛生效**（启动日志打印不同链数量与自动机规模）；`BenchmarkEngine_NoMatch` 达到 0 allocs/op；阶段 1/2 生效；语料回归跑通；`donothack test -r` 可用 |
-| P3 | 评分与阈值生效；detect/block 模式可热切；限速与临时封禁生效且状态表容量上限可验证（伪造 IP 喷洒不涨内存）；白名单不误伤；`medium` profile 压测达标（P99 < 0.5ms 纯转发、吞吐降幅 < 10%、满负载 RSS < 120 MiB）且 `small` 保底线达标；L1–L4 降级可用且状态可见 |
+| P3 | 评分与阈值生效；detect/block 模式可热切；限速与临时封禁生效且状态表容量上限可验证（伪造 IP 喷洒不涨内存）；白名单不误伤；`medium` profile 压测达标（P99 < 0.5ms 纯转发、相对裸代理吞吐降幅 < 10%、满负载 RSS < 120 MiB）且 `small` 保底线达标；L1–L4 降级可用且状态可见 |
 | P4 | `control.Apply` 契约生效（失败回滚、错误可诊断）；零停机 reload（含峰值内存校验）验证通过；指标齐全（含池命中率、降级级别）；审计轮转正常；`/api/v1` 鉴权与登录锁定生效；缺自定义头/伪造 Origin 的写操作被拒；操作审计落盘；TLS 开关与证书热加载可用（默认关）；明文 HTTP 与 XFF 还原链路验证通过 |
 | P5 | 控制台八个页面可用；`small` 档控制台额外内存 ≤ 8 MiB；事件查询 3 天范围 P99 < 300ms；含 `<script>` 的 payload 在列表页不回显原文；CSP 无 `unsafe-inline`；CLI 与控制台共用同一套 API |
 | P6 | 内置规则集覆盖 SQLi/XSS/RCE/LFI/RFI/webshell/扫描器/协议/上传，每条有正负样本；误报治理报告产出；真机 2 核 2 GiB 基线报告与运维文档齐 |
@@ -869,7 +869,7 @@ testdata/corpus/
 
 ### 17.5 性能门禁（**独立于功能测试，单独卡**）
 
-性能不是"以后优化"，是每个阶段的验收项。门禁脚本 `scripts/perf-gate.ps1` 超标即非零退出：
+性能不是"以后优化"，是每个阶段的验收项。门禁脚本 `python scripts/perf-gate.py` 超标即非零退出：
 
 | 门禁 | 阈值 | 卡在哪个阶段 |
 | --- | --- | --- |
@@ -878,7 +878,7 @@ testdata/corpus/
 | `BenchmarkEngine_FullRules` | 候选规则数 < 10，< 45µs/op | P2 |
 | 端到端 donothack 自身新增分配 | ≤ 2 allocs/req | P2 起 |
 | `medium` 纯转发附加延迟 | P99 < 0.5ms | P3 |
-| `medium` 吞吐降幅 | < 10% | P3 |
+| `medium` 吞吐降幅（对裸反向代理） | < 10% | P3 |
 | `medium` 空载 / 满负载 RSS | < 25 MiB / < 120 MiB | P3 |
 | `small` 保底线（吞吐 / RSS） | ≥ 3000 rps / < 48 MiB | P3 |
 | 30 分钟压测 RSS 增长 | 无单调增长 | P3 |
@@ -893,7 +893,7 @@ testdata/corpus/
 
 ### P0 骨架（可运行）
 
-产出：仓库结构、`go.mod`、配置加载与校验、**profile 自动探测（cgroup v2/v1 退化到 NumCPU + meminfo）与内存预算表**、`GOMEMLIMIT`/`GOGC` 设置、**连接与超时上限（`MaxHeaderBytes`、读超时、并发连接信号量）**、纯转发反向代理、结构化访问日志、`/healthz` `/readyz`、优雅停机、Makefile（`GOAMD64=v1` 钉死）、压测脚本骨架、CI（本地脚本）、systemd 单元模板。
+产出：仓库结构、`go.mod`、配置加载与校验、**profile 自动探测（cgroup v2/v1 退化到 NumCPU + meminfo）与内存预算表**、`GOMEMLIMIT`/`GOGC` 设置、**连接与超时上限（`MaxHeaderBytes`、读超时、并发连接信号量）**、纯转发反向代理、结构化访问日志、`/healthz` `/readyz`、优雅停机、Makefile（`GOAMD64=v1` 钉死）、`cmd/loadgen` 与 `cmd/testupstream` 与 `cmd/plainproxy`、`scripts/lint.py` 门禁、`scripts/bench.py`、`scripts/passthrough.py`、systemd 单元模板。
 
 交付判据：能起服务、能转发、能停、测试通过、`GOMAXPROCS=1` 下压测脚本能出对比表。打 tag `v0.1.0-mvp`。
 
@@ -907,7 +907,7 @@ testdata/corpus/
 
 ### P2 规则引擎
 
-产出：`transform`、`operator`（regex / pm / contains / startsWith / eq / detectSQLi / detectXSS / entropy / luhn / ipMatch）、`rules`（YAML 加载、编译、索引、**变换链去重 + 共享 Aho-Corasick 预筛**）、`engine` 阶段 1/2、`donothack test -r`、`scripts/perf-gate.ps1`、`docs/RULES.md` 定稿。
+产出：`transform`、`operator`（regex / pm / contains / startsWith / eq / detectSQLi / detectXSS / entropy / luhn / ipMatch）、`rules`（YAML 加载、编译、索引、**变换链去重 + 共享 Aho-Corasick 预筛**）、`engine` 阶段 1/2、`donothack test -r`、`python scripts/perf-gate.py`、`docs/RULES.md` 定稿。
 
 交付判据：规则能写、能加载、能命中、能离线自测、`BenchmarkEngine_NoMatch` 达到 0 allocs/op。
 
