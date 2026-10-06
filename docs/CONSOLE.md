@@ -101,23 +101,44 @@ type Mutation interface {
 
 ## 3. 认证与安全
 
-### 3.1 认证模式
+### 3.1 两层：访问门槛（防扫描器）+ 正式登录（认证）
 
-控制台可以公网访问，方便运维。**但三条不让步**：
+**这两件事必须分开看。**
 
-| 必须 | 原因 |
-| --- | --- |
-| **TLS**（公网绑定时） | HTTP Basic 的口令是 base64，不是加密。明文公网 = 把管理员口令广播出去。 |
-| **登录失败锁定 + 限流** | 没有它，Basic 就是把口令交给字典。这是唯一挡住暴力破解的一层。 |
-| **写操作强制自定义头 + Origin 校验** | Basic 凭据由浏览器自动附带，跨站表单能触发写操作。要求自定义头 `X-Donothack-Console: 1` 可挡住，因为跨站表单/图片无法设置自定义头。 |
+- **访问门槛**：目的是让公网上的扫描器、爬虫、批量探测**根本看不到这里有个控制台**。它降低的是噪音与攻击面，**不是安全边界**。
+- **正式登录**：回答"你是谁"。这才是认证边界，全部安全责任由它承担。
 
-三种模式，配置 `admin.auth_mode`：
+把门槛当认证用（"加了 Basic 就安全了"）是典型错误；反过来指望登录页自己挡住扫描器，会让日志被探测流量淹没、让暴力破解有充足尝试次数。两层各司其职。
 
-| 模式 | 说明 | 适用 |
+#### 第一层：访问门槛（防扫描器）
+
+| 方式 | 行为 | 评价 |
 | --- | --- | --- |
-| `basic` | HTTP Basic（+ 强制自定义头 + Origin 校验）。最省事，**运维友好，作为默认**。 | 公网小规模运维 |
-| `session` | 表单登录 → Cookie（`HttpOnly; SameSite=Strict; Secure`）+ CSRF token 双提交。可登出、有会话超时。 | 多人或要求更严 |
-| `both` | 两者都接受（Basic 给脚本/CLI，会话给浏览器）。 | 混合 |
+| `gate.path_token` | 控制台挂在长随机路径 `/<32 位随机串>/` 下，其他路径**一律 404**，不暴露任何存在性 | **推荐**。扫描器拿不到"这里有东西"的信号 |
+| `gate.drop` | 未过门槛的连接**直接断开**，连 404 都不给 | 最彻底，通常与 `path_token` 叠加 |
+| `gate.basic` | 返回 `401 + WWW-Authenticate` | 能挡掉不认账的爬虫，但 **401 等于告诉扫描器"这里有个需要认证的服务"**，反而给字典攻击指路。可选，不作首选 |
+| `gate.none` | 直接暴露登录页 | 仅限本地或内网 |
+
+判定顺序：连接 → 门槛 → （不过则 404 或断连）→ 登录页 → 认证。
+
+门槛之外再加一层**探测封禁**：同一 IP 60 秒内触发门槛失败 20 次，封该 IP 15 分钟并记审计。这条比门槛本身更能压住扫描噪音。
+
+**门槛不是安全边界**，所以它的配置可以写进文档、可以被猜到。真正挡住人的是第二层。
+
+#### 第二层：正式登录
+
+表单登录页 + 会话。配置 `admin.auth_mode`：
+
+| 模式 | 说明 |
+| --- | --- |
+| `session` | **默认**。表单登录 → 随机 32 字节会话 token 存内存 → Cookie（`HttpOnly; SameSite=Strict; Secure`）+ CSRF token 双提交。可登出、有闲置超时。 |
+| `session+basic` | 会话给浏览器；同时接受 HTTP Basic，**只作为 CLI 脚本的便利通道**，不承担认证设计。 |
+
+无论哪种模式：
+
+- 写操作强制自定义头 `X-Donothack-Console: 1` + Origin 校验。会话模式下再叠加 CSRF token 双保险 —— 自定义头对跨站表单是硬阻断，CSRF token 对同源脚本注入是兜底。
+- 登录失败锁定（见 §3.2）。
+- 绑非本地地址必须启用 TLS（未启用需显式 `admin.allow_insecure: true`，见 §3.5）。
 
 **技术选型（刻意避开额外依赖）**：
 
@@ -149,19 +170,38 @@ type Mutation interface {
 | `Referrer-Policy` | `no-referrer` |
 | 版本号 | 登录后才显示；未登录页不泄露版本与构建信息 |
 | 错误详情 | 未登录只返回通用错误；登录后返回可诊断信息 |
+| DOM 写入 | **只用 `textContent` 与 `createElement`**；`innerHTML` 全站禁用，CI grep 门禁卡死（见 §3.4） |
+| 门槛失败 | 同一 IP 60 秒内 20 次 → 封 15 分钟；不返回任何"你被拦了"的细节 |
 
-### 3.4 **绝不回显攻击 payload 原文**
+### 3.4 payload 展示：绝对代码模式
 
-这是本项目控制台最重要的一条安全约束。
+攻击 payload 必须**看得见** —— 看不见就没法判断这是不是误报，运维体验直接垮掉。但它**绝不能作为内容参与 HTML 渲染**。做法是把它当"代码"渲染。
 
-WAF 控制台里渲染攻击 payload = 自己给自己种一个**存储型 XSS**。攻击者只要构造一条会被记录的 payload，管理员打开"攻击日志"页的那一刻，脚本就在管理员浏览器里以控制台权限执行 —— 而这个控制台能关掉所有规则、把攻击者 IP 加进白名单。
+#### 渲染规则（前端唯一通路）
 
-所以：
+- payload 一律写进 `<pre><code>`，并且**只通过 `textContent` 赋值**，永不经过 `innerHTML`。
+- 前端封装唯一原语 `renderCode(text)`：`document.createElement('pre')` + `code.textContent = text`。**所有** payload 展示必须走它，不允许各页面自己拼。
+- **全前端禁用** `innerHTML` / `outerHTML` / `insertAdjacentHTML` / `document.write` / `eval` / `new Function`，用 CI 的 grep 门禁卡死（`scripts/lint-no-innerhtml.ps1`）。门禁比文档约定可靠 —— 约定会被人忘，门禁不会。
+- **不引第三方 markdown 库**。视图结构用自研的极小 markdown 子集渲染器（只支持代码块、表格、粗体、换行），**不支持链接、图片、raw HTML**；代码块内容强制走 `renderCode`。
+- payload 文本在**服务端先做可打印化**：控制字符与不可打印字节转 `\xNN`，按 UTF-8 边界截断（默认 4 KiB），并标注是否被截断。这样即使前端出问题，文本里也没有可执行的东西。
+- **双层防护**：服务端可打印化 + 前端 `textContent`。任一层失效都不会导致执行。
 
-- 事件列表与详情**只显示摘要**：参数名、算子名、命中长度、类目、分数、指纹描述（如 `sqli fingerprint: union select`）。
-- payload 片段如需展示，**只显示可打印化（ASCII escape 后）的截断片段**，并且仍然经过模板转义。
-- 想查看 payload 原文：单独动作 `POST /api/v1/events/:id/reveal`，**必须记一条操作审计**（谁、什么时候、看了哪条），并在页面上显示留痕提示。
-- 默认配置下 payload 原文**根本不入库**（`log.capture_payload: false`），所以"查看原文"只对开启抓取之后的事件可用。
+#### 展示位置
+
+- **列表页只显示摘要**：参数名、算子、命中长度、类目、分数、指纹描述。一屏几十条 payload 展开既刷屏又费带宽。
+- **详情页展开代码块**：展示变换前 / 变换后两段 payload（原始与解码后的对比是判断误报的关键信息），复制按钮，以及"下载原始字节"（取证用）。
+- 默认仍不落原文：`log.capture_payload` 默认关，审计只记摘要与命中位置。要用代码模式看原文需显式打开抓取，页面提示内存与合规影响。
+
+#### 验收（E2E，必须做）
+
+用三条 payload 走完整链路 —— `<script>alert(1)</script>`、`<img src=x onerror=alert(1)>`、`javascript:alert(1)` —— 断言页面 DOM：
+
+- 没有 `script` 元素被插入；
+- 没有任何元素带 `on*` 事件属性；
+- 没有任何 `a[href^="javascript:"]`；
+- payload 文本出现在 `<pre><code>` 内，且与期望的可打印化结果逐字节一致。
+
+三条都过，这个页面才算做完。
 
 ### 3.5 明文绑定的处理
 
@@ -188,10 +228,11 @@ WAF 控制台里渲染攻击 payload = 自己给自己种一个**存储型 XSS**
 
 ### 4.2 攻击事件
 
-- 列表：时间、客户端 IP、方法、路径、命中规则 ID、类目、分数、裁决、耗时。支持按时间/裁决/类目/规则/IP/路径过滤。
-- 详情：事务全链路 —— 每个命中的 target（参数名）、变换链、变换前后摘要、算子与判定结果、分数累计过程、最终裁决来源、上游耗时、`ruleset_version`。
+- 列表：时间、客户端 IP、方法、路径、命中规则 ID、类目、分数、裁决、耗时。支持按时间/裁决/类目/规则/IP/路径过滤。**列表只显示摘要，不展开 payload。**
+- 详情：事务全链路 —— 每个命中的 target（参数名）、变换链、**变换前后 payload 两块代码块**（走 §3.4 的 `renderCode`）、算子与判定结果、分数累计过程、最终裁决来源、上游耗时、`ruleset_version`。
 - 实时：SSE 推送新事件，页面顶部可开关。
-- 导出：CSV / JSONL，导出走的还是同一个有界查询。
+- 导出：CSV / JSONL（payload 字段为可打印化后的文本），导出走的还是同一个有界查询。
+- 取证：详情页可"下载原始字节"，用于需要逐字节分析的场景。
 
 ### 4.3 规则管理
 
@@ -235,7 +276,8 @@ verdict: BLOCK (threshold 5, mode block)
 
 ### 4.7 系统设置
 
-- 控制台监听地址、认证模式、口令修改、TOTP 绑定（二维码用纯 JS 生成，本地渲染）
+- 门槛：门槛方式开关（`path_token` / `drop` / `basic` / `none`）、当前随机路径展示与**一键重新生成**（旧路径立即失效）、探测封禁阈值、门槛失败统计
+- 认证：登录口令修改、TOTP 绑定（二维码用纯 JS 生成，本地渲染）、会话超时、`api_token` 生成与轮换
 - 通知：webhook 地址、测试按钮、告警规则（拦截激增、规则加载失败、上游不可用、降级触发）
 - 日志：保留天数、单文件大小、payload 抓取开关（**打开时会显著警告内存与合规影响**）
 - 配置：当前配置只读视图、编辑（走 `Preview` → `Apply`）、与运行中的差异对比、导入/导出
@@ -271,9 +313,10 @@ verdict: BLOCK (threshold 5, mode block)
 | 分组 | 端点 |
 | --- | --- |
 | 认证 | `POST /login`、`POST /logout`、`GET /session`、`POST /password`、`POST /totp/enroll` |
+| 门槛 | `GET /gate`（当前门槛配置与随机路径）、`POST /gate/rotate`（重新生成随机路径，旧路径立即失效） |
 | 状态 | `GET /status`（版本、profile、内存预算、降级级别、运行时长、规则集版本） |
 | 指标 | `GET /metrics/summary`、`GET /metrics/timeseries?range=1h` |
-| 事件 | `GET /events`、`GET /events/:id`、`POST /events/:id/reveal`、`GET /events/stream`（SSE）、`GET /events/export` |
+| 事件 | `GET /events`、`GET /events/:id`、`GET /events/:id/raw`（原始字节，取证用）、`GET /events/stream`（SSE）、`GET /events/export` |
 | 规则 | `GET /rules`、`GET /rules/:id`、`PATCH /rules/:id`（启停）、`POST /rules/validate`、`POST /rules/test`、`GET /rulesets` |
 | 规则集操作 | `POST /rulesets/reload`、`POST /rulesets/preview` |
 | 例外 | `GET/POST/PATCH/DELETE /exceptions`、`GET/POST/DELETE /ip-lists` |
@@ -304,7 +347,9 @@ web/
     router.js                History API 路由（约 60 行）
     api.js                   fetch 封装、统一错误与认证头
     store.js                 轻量响应式状态（约 80 行，手写，不引框架）
-    dom.js                   htm 风格模板字面量 helper（约 30 行）
+    dom.js                   模板字面量 helper + **renderCode 原语**（约 60 行）
+    md.js                    极小 markdown 子集渲染器（代码块/表格/粗体/换行，约 80 行）
+    safe.js                  禁止清单的运行时断言（开发模式下 innerHTML 被改写为抛错）
     views/dashboard.js
     views/events.js
     views/rules.js
@@ -324,14 +369,16 @@ web/
 技术要点：
 
 - **原生 ES module**：浏览器直接 `import`，不需要打包器。所有文件走 `go:embed`，由 Go 静态文件服务发出，MIME 类型正确即可。
-- **无 TypeScript、无 JSX**：视图用模板字面量 + 一个 30 行的 `html` tagged template helper（自动转义插值）。
+- **无 TypeScript、无 JSX**：视图用模板字面量 + 一个 `dom.js` helper（插值走 `textContent`，不做字符串拼 HTML）。
 - **不用框架**：状态管理手写约 80 行（对象 + 订阅 + 重渲染），SPA 复杂度在这个规模下不值得引框架。
+- **`innerHTML` 全面禁用**：所有 DOM 写入只走 `createElement` + `textContent`。payload 走 `renderCode`（见 §3.4），结构文本走 `md.js`。CI 门禁 `scripts/lint-no-innerhtml.ps1` grep 全前端源码，命中即失败；开发模式下 `safe.js` 把 `innerHTML` 改写成抛错，本地一跑就炸，不用等 CI。
+- **markdown 只用于"结构"，不用于"内容"**：`md.js` 只支持代码块、表格、粗体、换行四种子集，不支持链接、图片、raw HTML、内联事件。代码块内容强制 `textContent`。**不引任何第三方 markdown 库** —— 引进来就等于把渲染器的 XSS 面一起引进控制台。
 - **图表用 uPlot**（40KB，无依赖，性能好，低配浏览器也不卡）。
-- **路由**：`/console/*` 全部回落到 `index.html`；`/console/api/v1/*` 走 API。
+- **路由**：门槛路径前缀下全部回落到 `index.html`；`/api/v1/*` 走 API。
 - **缓存**：带内容哈希的资源 `Cache-Control: public, max-age=31536000, immutable`；`index.html` `no-cache`。资源 URL 带 `?v=<build>`，构建版本来自 `ldflags` 注入的版本号，所以**不需要构建链也能做缓存失效**。
 - **预压缩**：CSS/JS 在仓库里存 `.gz` 或启动时首次请求压缩后缓存；`small` 档只做流式 gzip，不常驻。
 
-体积预算：vendored uPlot 40KB + 自写 JS ≤ 120KB + CSS ≤ 40KB ≈ **200KB 未压缩，gzip 后约 60KB**。二进制目标从 ≤ 12 MiB 调整为 ≤ 14 MiB。
+体积预算：vendored uPlot 40KB + 自写 JS ≤ 140KB + CSS ≤ 40KB ≈ **220KB 未压缩，gzip 后约 65KB**。二进制目标 ≤ 14 MiB。
 
 界面风格：手写 design tokens，深浅色主题跟随系统，表格与抽屉为主，不追求花哨动效 —— 运维页面要的是信息密度和响应速度。
 
@@ -416,9 +463,10 @@ web/
 
 - [x] 单站点先行，多站点 P7（2026-10-06 定）
 - [x] 前端原生 ES module SPA，无 Node 构建链（2026-10-06 定）
-- [x] 控制台可公网访问（2026-10-06 定），因此 TLS、失败锁定、自定义头+Origin 校验为**强制项**
-- [ ] `basic` 作为默认认证模式是否可接受（`session` 模式更方便登出与多用户）
+- [x] 控制台可公网访问（2026-10-06 定），因此 TLS、失败锁定、自定义头 + Origin 校验为**强制项**
+- [x] 访问门槛（防扫描器）与正式登录**分两层**：门槛用 `path_token`（404，可选叠加 `drop`），认证用表单登录 + 会话（`session` 默认），Basic 降级为可选的脚本通道
+- [x] payload 展示用**绝对代码模式**：`<pre><code>` + `textContent`，`innerHTML` 全站禁用并加 CI 门禁，不用第三方 markdown 库（见 §3.4）
 - [ ] 是否需要多用户与角色（管理员 / 只读运维）——当前设计为单管理员 + 只读 API token
 - [ ] 事件保留默认 7 天 / 512 MiB 是否合适
-- [ ] 是否需要「查看 payload 原文」入口（默认关闭；开启需要接受 XSS 面与合规风险）
+- [ ] 门槛随机路径是否需要支持自定义（用自己记得住的路径 vs 全随机）
 - [ ] 控制台是否需要支持暗色以外的主题定制（暂定跟随系统）

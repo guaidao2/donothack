@@ -970,7 +970,7 @@ testdata/corpus/
 10. **目标 VPS**：已定 2 核 2 GiB（`medium` 为目标档），1 核 512 MiB 为保底线。**仍需一台真机跑基线**，否则 §15.3 的数字只能标注"未经实测"。
 11. **控制台认证默认模式**（`basic` 还是 `session`）与是否需要多用户/角色 —— 见 `docs/CONSOLE.md` §11。
 12. **多站点（P7）是否真要做**：当前单站点，数据结构按 `[]Site` 预留。若确定要，P4 的 `Snapshot` 结构就要一次到位，别等 P7 再动。
-13. **控制台是否要暴露 payload 原文查看入口**：默认关。开启要接受"控制台自身成为 XSS 载体"的风险与合规问题。
+13. **payload 展示**：已定用绝对代码模式（`<pre><code>` + `textContent`，全站禁 `innerHTML`，CI 门禁）。列表页只显示摘要，详情页展开代码块；原文是否落盘仍由 `log.capture_payload` 控制，默认关。
 
 ---
 
@@ -1086,8 +1086,15 @@ metrics:
 
 admin:
   enabled: true
-  addr: "127.0.0.1:9443"    # 控制台 + /api/v1 监听地址
-  auth_mode: basic          # basic | session | both
+  addr: "0.0.0.0:9443"      # 控制台 + /api/v1 监听地址
+  gate:                     # 第一层：防扫描器（不是安全边界）
+    mode: path_token        # path_token | drop | basic | none（可与 drop 叠加）
+    path_token: ""          # 空则启动时生成 32 位随机串并打印；填了就用自己的
+    drop_unmatched: true    # 未过门槛的连接直接断开而非返回 404
+    probe_ban_window: 60s   # 同 IP 触发门槛失败
+    probe_ban_after: 20     # 达此次数
+    probe_ban_duration: 15m
+  auth_mode: session        # 第二层：session | session+basic
   username: "admin"
   password_hash: ""         # PBKDF2-HMAC-SHA256 600k 迭代；为空则控制台不启动并打印生成命令
   api_token: ""             # CLI 与脚本用；可单独生成与轮换
@@ -1127,6 +1134,8 @@ alert:
 - [x] **必须有 Web 控制台**（对标雷池），单站点先行、多站点后置 P7
 - [x] 控制台前端用原生 ES module SPA，不引 Node 构建链
 - [x] 控制台可公网访问 —— 因此 TLS、登录失败锁定、写操作自定义头 + Origin 校验为**强制项**
+- [x] 控制台分两层：**访问门槛防扫描器**（`path_token` → 404，可叠加断连）与**正式登录做认证**（表单登录 + 会话）；Basic 降级为可选的脚本通道
+- [x] payload 展示用**绝对代码模式**（`<pre><code>` + `textContent`，全站禁 `innerHTML` 并加 CI 门禁，不引第三方 markdown 库）——“看得见”与“安全”同时满足
 
 仍待确认：
 
@@ -1140,7 +1149,6 @@ alert:
 - [ ] 是否提供真机（2 核 2 GiB）跑一次基线，否则目标值只能标注"未经实测"
 - [ ] §18 阶段划分与顺序是否认可（P0 骨架是否过轻）
 - [ ] §20 未决问题逐条定调
-- [ ] 控制台认证默认用 `basic` 还是 `session`（见 `docs/CONSOLE.md` §11）
-- [ ] 是否需要多用户与角色（管理员 / 只读运维）
+- [ ] 控制台认证默认模式与是否需要多用户/角色（见 `docs/CONSOLE.md` §11）
 - [ ] 事件保留默认 7 天 / 512 MiB 是否合适
-- [ ] 是否开放「查看 payload 原文」入口（默认关；开启需接受 XSS 面与合规风险）
+- [ ] 门槛随机路径是否需要支持自定义（用自己记得住的 vs 全随机）

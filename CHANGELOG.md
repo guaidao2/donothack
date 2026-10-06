@@ -62,6 +62,21 @@
 - `PERFORMANCE.md`：profile 表与有界性表加入控制台内存与查询上限；内存预算加入 24 MiB 控制台项（合计 112 MiB，目标 ≤ 120 MiB）；二进制体积目标由 ≤ 12 MiB 调整为 ≤ 14 MiB（控制台静态资源）。
 - `README.md`：阶段表、文档列表、设计要点、非目标同步。
 
+### 变更（第四稿：控制台两层准入 + payload 代码模式）
+
+- **认证拆成两层**（`CONSOLE.md` §3.1）：
+  - 第一层**访问门槛（防扫描器）**：`path_token`（控制台挂在 32 位随机路径下，其他路径一律 404，不暴露存在性，**推荐**）、可叠加 `drop`（直接断连）、可选 `basic`（但 401 等于告诉扫描器这里有服务，不作首选）。另加探测封禁：同 IP 60 秒 20 次门槛失败 → 封 15 分钟。
+  - 第二层**正式登录（认证）**：表单登录 + 会话，`admin.auth_mode: session` 成为默认；`session+basic` 时 Basic 只作 CLI 脚本通道。
+  - 明确写清：门槛**不是安全边界**，不能当认证用；认证也不能替代门槛，否则探测流量淹没日志、暴力破解尝试次数充足。
+- **payload 展示改为「绝对代码模式」**（`CONSOLE.md` §3.4）：payload 必须看得见，否则没法判断误报；但绝不作为内容参与 HTML 渲染。
+  - 一律 `<pre><code>` + `textContent`，封装唯一原语 `renderCode`。
+  - **全前端禁用** `innerHTML` / `outerHTML` / `insertAdjacentHTML` / `document.write` / `eval` / `new Function`，CI 门禁 `scripts/lint-no-innerhtml.ps1` 卡死；开发模式运行时改写 `innerHTML` 为抛错。
+  - **不引第三方 markdown 库**；自研极小 markdown 子集（代码块/表格/粗体/换行），不支持链接、图片、raw HTML。
+  - 服务端先做可打印化（控制字符转 `\xNN`，UTF-8 边界截断 4 KiB），前端再 `textContent`，双层防护。
+  - 列表页只显示摘要，详情页展开代码块（变换前后对比），另提供"下载原始字节"取证。
+  - E2E 必须用 `<script>alert(1)</script>`、`<img src=x onerror=alert(1)>`、`javascript:alert(1)` 三条 payload 断言 DOM 无脚本、无 `on*`、无 `javascript:` 链接。
+- `DESIGN.md` 附录 B 的 `admin` 配置加入 `gate` 段并把 `auth_mode` 改为 `session`；附录 C 与 §20 同步定稿。
+
 ### 状态
 
 设计与文档阶段，尚无实现代码。下一步 P0（骨架，含 profile 探测与性能地基）。
