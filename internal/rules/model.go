@@ -20,6 +20,19 @@ import (
 	"donothack/internal/tx"
 )
 
+// RuleAction 是规则的处置动作。
+//
+// 只有显式写了 action 的规则才会走这条快捷路径；不写就按类目评分累计，
+// 到阈值再拦 —— 后者是默认，也是误报最可控的方式。
+type RuleAction struct {
+	// Type: log | block | challenge | tarpit | drop
+	Type string
+	// Status 是拦截时返回的状态码（0 = 用全局默认）。
+	Status int
+	// BanIP 表示命中后同时临时封禁来源 IP。
+	BanIP bool
+}
+
 // SourceRef 记录规则来自哪个文件的第几行，用于报错定位。
 type SourceRef struct {
 	File  string
@@ -87,6 +100,9 @@ type CompiledRule struct {
 	// 预筛用
 	Literals      [][]byte
 	Prefilterable bool // false 表示该规则必须每请求都评估（如纯 entropy）
+
+	// Action 是规则声明的处置动作。空表示按分数走（默认行为）。
+	Action RuleAction
 
 	Source SourceRef
 	Test   TestCase

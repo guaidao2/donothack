@@ -23,12 +23,16 @@ import (
 	"syscall"
 
 	"donothack/internal/audit"
+	"donothack/internal/blockpage"
 	"donothack/internal/config"
+	"donothack/internal/degrade"
 	"donothack/internal/engine"
 	"donothack/internal/parser"
 	"donothack/internal/pipeline"
 	"donothack/internal/profile"
 	"donothack/internal/proxy"
+	"donothack/internal/ratelimit"
+	"donothack/internal/realip"
 	"donothack/internal/rules"
 	"donothack/internal/server"
 	"donothack/internal/tx"
@@ -191,14 +195,82 @@ func run(cfgPath string, checkOnly, printBudget, noRules bool) error {
 		IdleConnTimeout:       cfg.Upstream.IdleConnTimeout.D(),
 		MaxIdleConnsPerHost:   cfg.Upstream.MaxIdleConnsPerHost,
 	})
+	// ---- 真实 IP ----
+	resolver, err := realip.New(realip.Options{
+		TrustedProxies: cfg.RealIP.TrustedProxies,
+		Header:         cfg.RealIP.Header,
+	})
+	if err != nil {
+		return fmt.Errorf("real_ip 配置无效：%w", err)
+	}
+	if resolver.TrustedCount() == 0 {
+		log.Warn("real_ip.trusted_proxies 为空：一律使用直连对端地址，" +
+			"任何 X-Forwarded-For 都会被忽略。若站点前面有反向代理，限速与封禁会把所有流量算成同一个 IP")
+	}
+
+	// ---- 限速与封禁 ----
+	var limiter *ratelimit.Limiter
+	if cfg.RateLimit.Enabled {
+		capacity := p.RateLimitTableCapacity
+		if cfg.RateLimit.MaxKeys > 0 {
+			capacity = cfg.RateLimit.MaxKeys
+		}
+		limiter, err = ratelimit.New(ratelimit.Options{
+			RPS:          float64(cfg.RateLimit.DefaultRPS),
+			Burst:        float64(cfg.RateLimit.DefaultBurst),
+			BanAfterHits: cfg.RateLimit.BanAfterHits,
+			BanWindow:    cfg.RateLimit.BanWindow.D(),
+			BanDuration:  cfg.RateLimit.BanDuration.D(),
+			Whitelist:    cfg.RateLimit.Whitelist,
+			Capacity:     capacity,
+		})
+		if err != nil {
+			return fmt.Errorf("ratelimit 配置无效：%w", err)
+		}
+	}
+
+	// ---- 过载降级 ----
+	degrader := degrade.New(degrade.Options{
+		MemLimitBytes: memLimit,
+		MaxInflight:   cfg.Listen.MaxConns,
+		Mode:          cfg.Engine.Mode,
+		Enabled:       cfg.Engine.Degrade != "off",
+	})
+	degrader.Start()
+	defer degrader.Stop()
+
+	// ---- 拦截页 ----
+	page, err := loadBlockPage(cfg)
+	if err != nil {
+		return err
+	}
+	if page.CustomError() != "" {
+		log.Warn("自定义拦截页模板编译失败，已回退内置页面",
+			"file", cfg.BlockPage.File, "err", page.CustomError())
+	}
+
 	var dataplane http.Handler = fwd
 	if !noRules {
 		dataplane = pipeline.New(pipeline.Options{
-			Engine:   eng,
-			Next:     fwd,
-			Logger:   logger,
-			FailMode: cfg.Engine.FailMode,
+			Engine:           eng,
+			Next:             fwd,
+			Logger:           logger,
+			FailMode:         cfg.Engine.FailMode,
+			BlockPage:        page,
+			Limiter:          limiter,
+			Resolver:         resolver,
+			Degrader:         degrader,
+			BanOnBlock:       cfg.Engine.BanOnBlock,
+			BlockBanDuration: cfg.Engine.BlockBanDuration.D(),
 		})
+		log.Info("防护组件已就绪",
+			"realip_trusted", resolver.TrustedCount(),
+			"ratelimit", cfg.RateLimit.Enabled,
+			"ratelimit_rps", cfg.RateLimit.DefaultRPS,
+			"ratelimit_capacity", p.RateLimitTableCapacity,
+			"degrade", cfg.Engine.Degrade,
+			"block_page_custom", page.UsingCustom(),
+		)
 	}
 
 	srv := server.New(server.Options{
@@ -433,3 +505,35 @@ func printable(b []byte) string {
 
 var _ = io.Discard
 var _ = filepath.Join
+
+// loadBlockPage 构造拦截页渲染器。
+//
+// 自定义模板从磁盘读（控制台保存时写的就是这个文件）。**读失败不是致命错误** ——
+// 拦截页是兜底路径，它自己不能成为启动失败的原因；回退内置页并留痕即可。
+func loadBlockPage(cfg *config.Config) (*blockpage.Renderer, error) {
+	o := blockpage.Options{
+		Status:      cfg.BlockPage.Status,
+		Branding:    cfg.BlockPage.BrandingOn(),
+		ProductName: cfg.BlockPage.ProductName,
+		ProductURL:  cfg.BlockPage.ProductURL,
+		Contact:     cfg.BlockPage.Contact,
+		Title:       cfg.BlockPage.Title,
+		Version:     version.Version,
+	}
+	if f := strings.TrimSpace(cfg.BlockPage.File); f != "" {
+		path := f
+		if !filepath.IsAbs(path) && cfg.Path != "" {
+			path = filepath.Join(filepath.Dir(cfg.Path), path)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			// 文件不存在：可能是"还没在控制台里配过"，不算错误。
+			if !os.IsNotExist(err) {
+				return nil, fmt.Errorf("读取自定义拦截页失败：%w", err)
+			}
+		} else {
+			o.CustomHTML = string(raw)
+		}
+	}
+	return blockpage.New(o), nil
+}

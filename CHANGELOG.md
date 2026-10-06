@@ -186,3 +186,31 @@ P0 完成。下一步 P1（解析层：路径规范化、解码链、参数提�
   chunked 时连 Content-Length 一起删。原 PROTO-1006/1007 是死规则，已删除。
   风险说明：Go 与反向代理会重新编码请求，歧义传不到上游。
 - 无字面量规则占比 35%（语义算子），预筛收益受限；正解是规则多用 `pm`。
+
+## [2026-10-06] P3 防护动作与决策链路（tag `v0.4.0-protect`）
+
+### 新增
+- `internal/realip`：真实 IP 严格信任链。对端不可信时**完全忽略转发头**；
+  可信时从链最右往左剥离可信代理，遇到第一个不可信地址即为客户端；最多查 32 跳。
+- `internal/ratelimit`：令牌桶 + 固定窗口违规计数的临时封禁。
+  容量有界（LRU 淘汰，默认 8192 key，**封禁中的条目不淘汰**）；判定实测 25ns / 0 allocs。
+- `internal/degrade`：过载降级 L1–L4（丢日志 / 跳昂贵算子 / 只跑阶段 1 / 旁路）。
+  带滞回防抖动；三处可见（日志、`/readyz`、响应头）；
+  **block 模式只允许 L1，L2+ 直接 503**，绝不放行未经检测的流量。
+- `internal/blockpage`：拦截警告页。自包含（零外部资源、无 JS）、深浅色自适应、
+  按客户端类型给 HTML / JSON / 纯文本三种形态；内容可在控制台自定义（自定义模板
+  编译失败时回退内置页并留痕，绝不让手滑变成全站 500）；品牌展示可关。
+- 规则级处置动作真正生效：`action.type: log | block | challenge | tarpit | drop`
+  （原先只解析不生效）。优先级 Drop > Block > Tarpit > Challenge > Log。
+  `drop` 直接断连（不支持 Hijack 时退化为拦截页）；`tarpit` 有延迟上限（默认 3s）。
+- `engine.ban_on_block` / `block_ban_duration`：判定拦截时可选临时封禁来源 IP（默认关）。
+- `block_page.*` 配置段；`ratelimit.max_keys`；`Config.Path` 让相对路径相对配置文件解析。
+
+### 变更
+- `scripts/passthrough.py` 默认路径去掉攻击 payload —— 带 `/etc/passwd` 的路径会被
+  正确拦掉，脚本报"不一致"其实是在测检测（而且测对了）。攻击样本归 `acceptance.py`。
+
+### 已知边界
+- `challenge` 动作尚未实现（需要 JS + 签名 cookie），当前**降级为拦截**而不是放行。
+- 恶意流量占满连接时，拦截页渲染是每请求一次模板执行（实测 8.6µs）；
+  限速/封禁路径强制走纯文本（95ns）以避开这一点。

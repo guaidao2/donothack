@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -105,6 +106,37 @@ func ParseSize(s string) (int64, error) {
 	return int64(n * float64(mult)), nil
 }
 
+// BlockPageConfig 是拦截页配置。
+//
+// 拦截页有两个作用：告诉正常用户"为什么被拦、怎么申诉"，
+// 以及（可选的）对外展示产品。**把展示做成开关**：开着等于告诉攻击者
+// 这里有 WAF 且是哪一个，这个取舍交给部署方定。
+type BlockPageConfig struct {
+	// Status 是拦截状态码（默认 403）。限速与封禁固定用 429。
+	Status int `yaml:"status"`
+	// Branding 是否展示产品名与版本。
+	Branding *bool `yaml:"branding"`
+	// ProductName 展示的产品名。
+	ProductName string `yaml:"product_name"`
+	// ProductURL 产品主页（可空）。
+	ProductURL string `yaml:"product_url"`
+	// Contact 误报申诉渠道（可空）。
+	Contact string `yaml:"contact"`
+	// Title 页面标题。
+	Title string `yaml:"title"`
+	// File 是自定义模板文件路径（相对配置文件所在目录）。
+	// 控制台保存自定义模板时也是写这个文件。
+	File string `yaml:"file"`
+}
+
+// BrandingOn 返回是否展示品牌（默认开）。
+func (c BlockPageConfig) BrandingOn() bool {
+	if c.Branding == nil {
+		return true
+	}
+	return *c.Branding
+}
+
 // Config 是完整配置。
 type Config struct {
 	Profile   string          `yaml:"profile"`
@@ -120,12 +152,17 @@ type Config struct {
 	Metrics   MetricsConfig   `yaml:"metrics"`
 	Admin     AdminConfig     `yaml:"admin"`
 	Alert     AlertConfig     `yaml:"alert"`
+	BlockPage BlockPageConfig `yaml:"block_page"`
 
 	// 以下三个字段由 Load 填充，不来自 YAML。
 	// ResolvedProfile 是 profile: auto 解析后的实际档位。
 	ResolvedProfile profile.Name      `yaml:"-"`
 	ProfileSource   string            `yaml:"-"`
 	Detection       profile.Detection `yaml:"-"`
+	// Path 是配置文件的绝对路径。**用于解析配置里的相对路径**（自定义拦截页模板等）——
+	// 相对路径必须相对配置文件，而不是相对进程工作目录，
+	// 否则 systemd 与手动启动会读到不同的文件。
+	Path string `yaml:"-"`
 }
 
 // ListenConfig 是数据面监听配置。
@@ -174,6 +211,12 @@ type EngineConfig struct {
 	FailMode                string `yaml:"fail_mode"`
 	Degrade                 string `yaml:"degrade"`
 	InboundAnomalyThreshold int    `yaml:"inbound_anomaly_threshold"`
+	// BanOnBlock 表示检测判定拦截时同时临时封禁来源 IP。
+	// 默认关：封禁是"加码"动作，误判时影响面比单次拦截大得多，
+	// 应当等规则稳定、观察过误报之后再开。
+	BanOnBlock bool `yaml:"ban_on_block"`
+	// BlockBanDuration 是上面那个封禁的时长。
+	BlockBanDuration Duration `yaml:"block_ban_duration"`
 }
 
 // RulesConfig 是规则集配置。
@@ -202,7 +245,9 @@ type LimitsConfig struct {
 
 // RateLimitConfig 是限速与封禁配置。
 type RateLimitConfig struct {
-	Enabled      bool     `yaml:"enabled"`
+	Enabled bool `yaml:"enabled"`
+	// MaxKeys 覆盖档位默认的状态表容量（0 = 用档位值）。
+	MaxKeys      int      `yaml:"max_keys"`
 	DefaultRPS   int      `yaml:"default_rps"`
 	DefaultBurst int      `yaml:"default_burst"`
 	BanAfterHits int      `yaml:"ban_after_hits"`
@@ -460,6 +505,14 @@ func Load(path string) (*Config, error) {
 			return nil, fmt.Errorf("配置文件 %s 是空的", path)
 		}
 		return nil, fmt.Errorf("解析 %s 失败：%w", path, err)
+	}
+
+	// 记下配置文件绝对路径：配置里的相对路径（自定义拦截页模板等）
+	// 一律相对配置文件，而不是相对进程工作目录。
+	if abs, err := filepath.Abs(path); err == nil {
+		cfg.Path = abs
+	} else {
+		cfg.Path = path
 	}
 
 	pn, err := profile.Parse(cfg.Profile)

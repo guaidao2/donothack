@@ -287,6 +287,10 @@ type AccessRecord struct {
 	// 命中信息只在有命中时出现：让"被拦了什么"在访问日志里一眼可见。
 	RuleID string `json:"rule_id,omitempty"`
 	Score  int    `json:"score,omitempty"`
+	// 代理链只在解析出真实 IP 时出现（限速与封禁的依据，排查时必须能核对）。
+	ProxyChain []string `json:"proxy_chain,omitempty"`
+	// Reason 说明为什么是这个裁决（限速/降级/例外等非规则原因）。
+	Reason string `json:"reason,omitempty"`
 }
 
 // shouldWrite 决定这条访问记录要不要落盘。
@@ -351,6 +355,13 @@ type Recorder struct {
 	Err        string
 	RuleID     string
 	Score      int
+	// ClientIP 是解析出的真实客户端 IP（不是 RemoteAddr）。
+	ClientIP   string
+	ProxyChain []string
+	Reason     string
+	// Status 让数据面在"还没经过 http.ResponseWriter"时就记下裁决状态码
+	// （限速与降级是在写响应前决定的）。
+	Status int
 }
 
 type recorderKey struct{}

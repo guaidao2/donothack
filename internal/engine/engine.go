@@ -83,14 +83,57 @@ func (e *Engine) Swap(rs *rules.RuleSet) (old *rules.RuleSet) {
 
 // Decision 是一次请求的检测结论。
 type Decision struct {
-	Verdict  tx.Verdict
-	Status   int
-	Score    int
-	RuleID   string
-	Reason   string
-	Events   []tx.Event
-	Mode     string
+	Verdict tx.Verdict
+	Status  int
+	Score   int
+	RuleID  string
+	Reason  string
+	Events  []tx.Event
+	Mode    string
+	// Degraded 记录降级档位（非空表示这次裁决是在降级状态下做出的）。
 	Degraded string
+
+	// 下面三个字段来自规则显式声明的 action（不是分数累计出来的）。
+	// 它们的使用受模式约束：**detect 模式下一律不拦** ——
+	// "只记录"就是只记录，规则不该绕过部署方的上线节奏。
+	actionVerdict tx.Verdict
+	actionRule    string
+	actionStatus  int
+	actionBan     bool
+}
+
+// 动作优先级：Drop > Block > Tarpit > Challenge > Log > Pass
+func actionPriority(v tx.Verdict) int {
+	switch v {
+	case tx.VerdictDrop:
+		return 5
+	case tx.VerdictBlock:
+		return 4
+	case tx.VerdictTarpit:
+		return 3
+	case tx.VerdictChallenge:
+		return 2
+	case tx.VerdictLog:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// verdictForAction 把规则的 action.type 映射成裁决。
+func verdictForAction(t string) tx.Verdict {
+	switch t {
+	case "block":
+		return tx.VerdictBlock
+	case "challenge":
+		return tx.VerdictChallenge
+	case "tarpit":
+		return tx.VerdictTarpit
+	case "drop":
+		return tx.VerdictDrop
+	default:
+		return tx.VerdictLog
+	}
 }
 
 // Process 跑完整条流水线。
@@ -205,6 +248,14 @@ func (e *Engine) runPhase(rs *rules.RuleSet, t *tx.Transaction, p tx.Phase, sc *
 		t.Score.Add(r.Category, r.Score)
 		dec.Events = append(dec.Events, ev)
 
+		// 规则显式声明的动作优先级高于分数累计
+		if v := verdictForAction(r.Action.Type); actionPriority(v) > actionPriority(dec.actionVerdict) {
+			dec.actionVerdict = v
+			dec.actionRule = r.ID
+			dec.actionStatus = r.Action.Status
+			dec.actionBan = r.Action.BanIP
+		}
+
 		if r.HardBlock {
 			// hard_block：命中即终止本阶段剩余规则。
 			// 注意 detect 模式下仍然只记录 —— 模式是部署方的选择，不该被规则绕过。
@@ -213,11 +264,15 @@ func (e *Engine) runPhase(rs *rules.RuleSet, t *tx.Transaction, p tx.Phase, sc *
 		return true
 	})
 
-	// 分数达标或命中 hard_block 就结束本阶段，不必再跑后面的规则。
+	// 分数达标、命中 hard_block、或已经拿到 drop/block 类动作就结束本阶段。
+	// drop 是最高优先级，遇到就没必要再花 CPU 跑后面的规则。
 	for _, ev := range dec.Events {
 		if ev.HardBlock {
 			return true
 		}
+	}
+	if dec.actionVerdict == tx.VerdictDrop {
+		return true
 	}
 	if t.Score.Total >= e.thresholdFor(t, dec) {
 		return true
@@ -245,6 +300,28 @@ func (e *Engine) thresholdFor(t *tx.Transaction, dec *Decision) int {
 
 // decide 把分数与模式翻译成裁决。
 func (e *Engine) decide(dec Decision) (tx.Verdict, int, string, string) {
+	blocking := Mode(e.opts.Mode) == ModeBlock || Mode(e.opts.Mode) == ModeMixed
+
+	// 1) 规则显式动作优先。detect 模式下一律只记录 ——
+	//    "只记录"就是只记录，规则不该绕过部署方的上线节奏。
+	if actionPriority(dec.actionVerdict) > actionPriority(tx.VerdictLog) {
+		if !blocking {
+			return tx.VerdictLog, 200, dec.actionRule,
+				"规则动作 " + dec.actionVerdict.String() + "（检测模式：仅记录）"
+		}
+		status := dec.actionStatus
+		if status == 0 {
+			if dec.actionVerdict == tx.VerdictDrop {
+				status = 0 // drop 直接断连，不写状态码
+			} else {
+				status = 403
+			}
+		}
+		return dec.actionVerdict, status, dec.actionRule,
+			"规则显式动作：" + dec.actionVerdict.String()
+	}
+
+	// 2) hard_block 命中即拦（同样受模式约束）
 	hardRule := ""
 	for _, ev := range dec.Events {
 		if ev.HardBlock {
@@ -266,13 +343,14 @@ func (e *Engine) decide(dec Decision) (tx.Verdict, int, string, string) {
 		ruleID = firstRuleID(dec.Events)
 	}
 
-	switch Mode(e.opts.Mode) {
-	case ModeBlock, ModeMixed:
+	if blocking {
+		if hardRule != "" {
+			return tx.VerdictBlock, 403, ruleID, "命中 hard_block 规则"
+		}
 		return tx.VerdictBlock, 403, ruleID, "分数达到拦截阈值"
-	default:
-		// detect 模式：只记录。这是上线默认值 —— 用真实命中数据决定哪条规则够格进拦截档。
-		return tx.VerdictLog, 200, ruleID, "检测模式：仅记录不拦截"
 	}
+	// detect 模式：只记录。这是上线默认值 —— 用真实命中数据决定哪条规则够格进拦截档。
+	return tx.VerdictLog, 200, ruleID, "检测模式：仅记录不拦截"
 }
 
 func firstRuleID(events []tx.Event) string {

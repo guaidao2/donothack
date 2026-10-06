@@ -183,6 +183,8 @@ func (s *Server) instrument(next http.Handler) http.Handler {
 			Error:      rec.Err,
 			RuleID:     rec.RuleID,
 			Score:      rec.Score,
+			ProxyChain: rec.ProxyChain,
+			Reason:     rec.Reason,
 		})
 	})
 }

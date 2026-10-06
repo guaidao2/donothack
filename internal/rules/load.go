@@ -437,6 +437,30 @@ func compileRule(opts Options, doc *yamlDoc, yr yamlRule, ref SourceRef) (*Compi
 			ref, yr.ID, len(cr.Test.Negative))
 	}
 
+	// 处置动作：只认白名单里的类型，写错就报错（写错动作比不写更危险：
+	// 作者以为在拦截，实际走了默认路径）
+	if yr.Action != nil {
+		act := strings.ToLower(strings.TrimSpace(yr.Action.Type))
+		switch act {
+		case "", "log", "block", "challenge", "tarpit", "drop":
+		default:
+			return nil, fmt.Errorf("%s：规则 %s 的 action.type=%q 非法（log | block | challenge | tarpit | drop）",
+				ref, yr.ID, yr.Action.Type)
+		}
+		if yr.Action.Status != 0 && (yr.Action.Status < 100 || yr.Action.Status > 599) {
+			return nil, fmt.Errorf("%s：规则 %s 的 action.status=%d 不是合法 HTTP 状态码",
+				ref, yr.ID, yr.Action.Status)
+		}
+		cr.Action = RuleAction{
+			Type:   act,
+			Status: yr.Action.Status,
+			BanIP:  yr.Action.BanIP,
+		}
+		if yr.Action.Redirect != "" {
+			return nil, fmt.Errorf("%s：规则 %s 用了 action.redirect_url，本轮未实现重定向动作", ref, yr.ID)
+		}
+	}
+
 	cr.Literals, cr.Prefilterable = extractLiterals(cr, opts.MinLiteralLen)
 	return cr, nil
 }

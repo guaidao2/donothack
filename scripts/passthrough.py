@@ -22,13 +22,19 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+# 默认只放**正常业务路径**。
+#
+# 这里刻意不放攻击 payload：带上 /etc/passwd 这类串的路径会被 WAF 正确拦掉，
+# 于是脚本会报"不一致" —— 那不是在测透传，是在测检测（而且还测对了）。
+# 攻击样本的验收归 scripts/acceptance.py 管，两边职责别混。
+# 想在透传里加自己的路径，用 --paths 传。
 DEFAULT_PATHS = [
     "/",
     "/robots.txt",
     "/static/favicon.ico",
     "/this-path-should-not-exist-9f3c",
-    "/?q=1&r=%2Fetc%2Fpasswd",
     "/index.php?id=1",
+    "/?q=shoes&page=2&sort=price",
 ]
 
 # 这些响应头天然会变，不能参与比对

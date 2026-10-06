@@ -44,11 +44,30 @@ real_ip:
   trusted_proxies: []
   header: "X-Forwarded-For"
 
+# ---------------------------------------------------------------- 拦截页
+block_page:
+  status: 403                    # 拦截状态码（限速与封禁固定用 429）
+  branding: true                 # 是否在页脚展示产品名与版本。
+                                 # 开着有宣传价值，但等于告诉攻击者"这里是什么 WAF"，
+                                 # 不想暴露就设 false。
+  product_name: "donothack"
+  product_url: ""                # 产品主页（可空）
+  contact: ""                    # 误报申诉渠道，例如 security@example.com
+  title: "请求已被安全策略拦截"
+  file: ""                       # 自定义模板文件（相对本配置文件）。
+                                 # 控制台里改拦截页内容时写的就是这个文件。
+                                 # 模板可用字段：TxID / Time / Method / Host / Path /
+                                 # Category / CategoryLabel / Status / StatusText /
+                                 # RetryAfter / ProductName / Version / Contact
+
+
 engine:
   mode: detect                   # detect（只记录）| block | mixed
   fail_mode: open                # open（出错放行，保业务）| closed
   degrade: auto                  # auto | off；block 模式下只允许 L1，L2+ 返回 503
   inbound_anomaly_threshold: 5
+  ban_on_block: false            # 判定拦截时是否顺带临时封禁来源 IP（建议先观察误报再开）
+  block_ban_duration: 300s
 
 rules:
   dir: "./rules"
@@ -70,6 +89,7 @@ ratelimit:
   enabled: true
   default_rps: 100
   default_burst: 200
+  max_keys: 0                    # 0 = 用档位默认（medium 档 8192）；键是客户端 IP，必须有界
   ban_after_hits: 20
   ban_window: 60s
   ban_duration: 300s
