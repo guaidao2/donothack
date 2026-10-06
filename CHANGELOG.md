@@ -151,3 +151,38 @@ P0 完成。下一步 P1（解析层：路径规范化、解码链、参数提�
 | 设计稿状态 | `git checkout v0.0.1-design` |
 | 查看设计与实现的差异 | `git diff v0.0.1-design..v0.1.0-mvp` |
 | 撤销某次错误提交 | `git revert <sha>` |
+
+## [2026-10-06] P2 规则引擎与规则集（tag `v0.3.0-engine`）
+
+### 新增
+- `internal/ac`：Aho-Corasick，用于算子 `pm` 与规则集共享预筛。
+- `internal/transform`：30 个变换，覆盖双写 URL、`%uXXXX`、HTML 实体、JS 转义三种形态、
+  base64（含缺 padding/URL-safe）、sqlHex、CSS 转义、注释分割、路径规范化。
+- `internal/operator`：编译期/运行期分离的算子；字符串/数值/字节范围/IP/逻辑组合
+  （深度封顶 4 层）+ 语义算子（detectSQLi、detectXSS、detectPathTraversal、
+  containsShellChars、isWebshellContent、entropy、luhn）。
+- `internal/rules`：YAML 加载 → 校验 → 编译 → 预筛索引；例外（reason+expires 强制、
+  过期自动失效）；链式规则；规则自带正负样本的加载期自测。
+- `internal/engine`：阶段流水线、按类目累计评分、detect/block/mixed 裁决；
+  无阶段 2 规则时完全不读请求体。
+- `internal/pipeline`：解析 → 检测 → 决策 → 放行/拦截；fail-open；拦截响应不回显 payload。
+- CLI：`rules check`、`test -r req.http`、`-no-rules`。
+- `rules/*.yaml` 57 条规则（9 类目）+ `testdata/corpus` 四类语料 + 两个自检脚本。
+- `scripts/acceptance.py`：原始报文端到端验收。
+
+### 修复
+- **Aho-Corasick 建边持有失效切片指针**：`m.nodes` 扩容后新边写到废弃数组上直接丢失，
+  症状是"某些模式永远匹配不上"。由规则集自测第一次运行时暴露。
+- **预筛漏检**：含交替 `|` 的正则只提最长字面量会跳过规则（SCAN-2003、UPLOAD-1001
+  实测完全没命中）。现含交替或可选组时放弃预筛，改为每请求评估。
+- **detectSQLi 漏子查询注入**：`1' and (select count(*) from users)>0--` 在去注释后
+  既无恒真比较也无 union。已加子查询形态指纹。
+- `chain` 原来是空操作（队友报告）：拆分规则会让前一半对每个请求加分，阈值被悄悄拉低。
+- 算子参数无校验导致 `depth`/`min_depth` 类笔误静默失效。
+- 绝对形式 request-target（`GET http://host/path`）被当成普通路径处理。
+
+### 已知边界（已写入文档）
+- **CL+TE 请求走私在本层检测不到**：Go 的 net/http 解析后就抹掉了这两个头，
+  chunked 时连 Content-Length 一起删。原 PROTO-1006/1007 是死规则，已删除。
+  风险说明：Go 与反向代理会重新编码请求，歧义传不到上游。
+- 无字面量规则占比 35%（语义算子），预筛收益受限；正解是规则多用 `pm`。
