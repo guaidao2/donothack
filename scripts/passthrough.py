@@ -41,6 +41,21 @@ DEFAULT_PATHS = [
 VOLATILE_HEADERS = {"date", "x-request-id", "set-cookie", "expires", "age", "etag:keep"}
 
 
+def normalize_base(base: str) -> str:
+    """把 `host:port` 补成 `http://host:port`。
+
+    为什么要容错：少写 scheme 时 urllib 会抛 "unknown url type"，
+    而脚本会把**每一条**都判成"不一致" —— 满屏红色差异看起来像 WAF 篡改了响应，
+    实际上是调用方式错了。这种误导比直接报错贵得多。
+    """
+    base = (base or "").strip()
+    if not base:
+        raise SystemExit("基址不能为空")
+    if "://" not in base:
+        base = "http://" + base
+    return base.rstrip("/")
+
+
 def fetch(base: str, path: str, method: str, body: bytes | None, headers: dict) -> dict:
     url = base.rstrip("/") + path
     req = urllib.request.Request(url, data=body, method=method, headers=headers)
@@ -74,8 +89,8 @@ def fetch(base: str, path: str, method: str, body: bytes | None, headers: dict) 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="透传保真度检查")
-    parser.add_argument("--direct", required=True, help="直连上游的基址")
-    parser.add_argument("--waf", required=True, help="经过 donothack 的基址")
+    parser.add_argument("--direct", required=True, help="直连上游的基址（可写 host:port，自动补 http://）")
+    parser.add_argument("--waf", required=True, help="经过 donothack 的基址（可写 host:port，自动补 http://）")
     parser.add_argument("--paths", default="", help="逗号分隔的路径列表")
     parser.add_argument("--post", default="", help="额外对这些路径发一次 POST（表单）")
     parser.add_argument("--method", default="GET")
@@ -95,9 +110,12 @@ def main() -> int:
     print(f"{'方法':<6}{'路径':<40}{'直连':>18}{'经WAF':>18}  结论")
     print("-" * 96)
 
+    direct_base = normalize_base(args.direct)
+    waf_base = normalize_base(args.waf)
+
     for method, path, body, headers in cases:
-        d = fetch(args.direct, path, method, body, headers)
-        w = fetch(args.waf, path, method, body, headers)
+        d = fetch(direct_base, path, method, body, headers)
+        w = fetch(waf_base, path, method, body, headers)
 
         same_status = d["status"] == w["status"]
         same_len = d["length"] == w["length"]
