@@ -82,6 +82,7 @@ type Limiter struct {
 	head    *entry // 最近使用
 	tail    *entry // 最久未用
 
+	enabled     atomic.Bool
 	allowed     atomic.Uint64
 	denied      atomic.Uint64
 	evicted     atomic.Uint64
@@ -125,31 +126,84 @@ func New(o Options) (*Limiter, error) {
 		}
 		return nil, fmt.Errorf("ratelimit.whitelist 里的 %q 既不是 CIDR 也不是 IP", s)
 	}
+	l.enabled.Store(o.RPS > 0 || o.BanAfterHits > 0)
 	return l, nil
 }
 
 // Enabled 报告限速是否生效。
-func (l *Limiter) Enabled() bool {
-	return l.o.RPS > 0 || l.o.BanAfterHits > 0
+func (l *Limiter) Enabled() bool { return l.enabled.Load() }
+
+// Reconfigure 热改限速参数。
+//
+// 控制台改限速走这里。**不重建状态表**：已封禁的 IP 不会因为改了个 rps 就放出来，
+// 已积累的违规计数也不清零 —— 否则攻击者只要诱导管理员改一次配置就能洗白。
+func (l *Limiter) Reconfigure(o Options) error {
+	if o.RPS < 0 {
+		return fmt.Errorf("rps 不能为负")
+	}
+	if o.Burst <= 0 {
+		o.Burst = o.RPS
+	}
+	if o.Burst < 1 {
+		o.Burst = 1
+	}
+	if o.BanWindow <= 0 {
+		o.BanWindow = time.Minute
+	}
+	if o.BanDuration <= 0 {
+		o.BanDuration = 5 * time.Minute
+	}
+	var wl []netip.Prefix
+	for _, s := range o.Whitelist {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		if pfx, err := netip.ParsePrefix(s); err == nil {
+			wl = append(wl, pfx.Masked())
+			continue
+		}
+		if addr, err := netip.ParseAddr(s); err == nil {
+			wl = append(wl, netip.PrefixFrom(addr, addr.BitLen()))
+			continue
+		}
+		return fmt.Errorf("whitelist 里的 %q 既不是 CIDR 也不是 IP", s)
+	}
+
+	l.mu.Lock()
+	l.o.RPS = o.RPS
+	l.o.Burst = o.Burst
+	l.o.BanAfterHits = o.BanAfterHits
+	l.o.BanWindow = o.BanWindow
+	l.o.BanDuration = o.BanDuration
+	l.wl = wl
+	l.mu.Unlock()
+	l.enabled.Store(o.RPS > 0 || o.BanAfterHits > 0)
+	return nil
 }
 
 // Allow 判定一次请求。
 //
 // key 通常是已解析出的客户端 IP；控制台另用前缀区分（如 "console:1.2.3.4"）。
+//
+// 整个判定在一把锁里完成（含白名单检查）：这样热改参数（Reconfigure）
+// 与判定之间不会出现"读到一半新一半旧"的状态。临界区里只有内存操作，很快。
 func (l *Limiter) Allow(key string) Decision {
-	if !l.Enabled() {
+	if !l.enabled.Load() {
 		return Decision{Allowed: true, Remaining: -1}
-	}
-	if l.isWhitelisted(key) {
-		l.whitelisted.Add(1)
-		return Decision{Allowed: true, Remaining: -1, Reason: "whitelist"}
 	}
 
 	now := l.o.Now()
 	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.isWhitelistedLocked(key) {
+		l.whitelisted.Add(1)
+		return Decision{Allowed: true, Remaining: -1, Reason: "whitelist"}
+	}
+
 	e := l.get(key, now, true)
 	if e == nil {
-		l.mu.Unlock()
 		// 表已满且淘汰失败（理论上不会发生）→ 放行。
 		// 限速器出问题时**倾向于放行**：它不该成为可用性的单点。
 		return Decision{Allowed: true, Remaining: -1, Reason: "store-full"}
@@ -157,7 +211,6 @@ func (l *Limiter) Allow(key string) Decision {
 
 	if now.Before(e.bannedTo) {
 		retry := e.bannedTo.Sub(now)
-		l.mu.Unlock()
 		l.denied.Add(1)
 		return Decision{Allowed: false, Banned: true, RetryAfter: retry, Reason: "banned"}
 	}
@@ -175,7 +228,6 @@ func (l *Limiter) Allow(key string) Decision {
 	if e.tokens >= 1 {
 		e.tokens--
 		remaining := int(e.tokens)
-		l.mu.Unlock()
 		l.allowed.Add(1)
 		return Decision{Allowed: true, Remaining: remaining}
 	}
@@ -183,7 +235,6 @@ func (l *Limiter) Allow(key string) Decision {
 	// 超限：这就是一次"违规"，计入封禁窗口
 	l.recordViolationLocked(e, now)
 	deniedNow := e.hits
-	l.mu.Unlock()
 	l.denied.Add(1)
 
 	retryAfter := time.Duration(0)
@@ -199,15 +250,15 @@ func (l *Limiter) Allow(key string) Decision {
 // 与 Allow 分开是因为"认证失败"和"请求太频繁"是两种不同的违规，
 // 但都该把同一个来源推向封禁。
 func (l *Limiter) Penalize(key string) (banned bool, until time.Time) {
-	if l.o.BanAfterHits <= 0 {
-		return false, time.Time{}
-	}
-	if l.isWhitelisted(key) {
-		return false, time.Time{}
-	}
 	now := l.o.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.o.BanAfterHits <= 0 {
+		return false, time.Time{}
+	}
+	if l.isWhitelistedLocked(key) {
+		return false, time.Time{}
+	}
 	e := l.get(key, now, true)
 	if e == nil {
 		return false, time.Time{}
@@ -393,7 +444,8 @@ func (l *Limiter) evictLocked() {
 	l.evicted.Add(1)
 }
 
-func (l *Limiter) isWhitelisted(key string) bool {
+// isWhitelistedLocked 判断是否在白名单内。**调用方必须持锁。**
+func (l *Limiter) isWhitelistedLocked(key string) bool {
 	if len(l.wl) == 0 {
 		return false
 	}

@@ -46,6 +46,13 @@ type Options struct {
 	// ExpandNestedDocs 是否做值级文档展开（base64(JSON) 那类）。
 	// 有成本，所以在有相关规则时才值得打开。
 	ExpandNestedDocs bool
+
+	// CapturePayload 是否把命中位置的"变换前/变换后"值带进事件。
+	//
+	// 默认关：**日志里永远不写 payload**，这个开关只影响内存事件
+	// （控制台详情页与规则测试台用它给人看"到底命中了什么"）。
+	// 打开时在入口处做一次可打印化 + 截断，不会因为 10 MB 的 body 撑爆内存。
+	CapturePayload bool
 }
 
 // Engine 是检测引擎。
@@ -244,6 +251,10 @@ func (e *Engine) runPhase(rs *rules.RuleSet, t *tx.Transaction, p tx.Phase, sc *
 			Truncated:  t.Vars.BodyTruncated,
 			HardBlock:  r.HardBlock,
 			At:         t.StartedAt,
+		}
+		if e.opts.CapturePayload {
+			ev.PayloadBefore = h.Before
+			ev.PayloadAfter = h.After
 		}
 		t.Score.Add(r.Category, r.Score)
 		dec.Events = append(dec.Events, ev)

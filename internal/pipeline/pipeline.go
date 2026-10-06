@@ -22,6 +22,7 @@ import (
 	"donothack/internal/blockpage"
 	"donothack/internal/degrade"
 	"donothack/internal/engine"
+	"donothack/internal/eventstore"
 	"donothack/internal/ratelimit"
 	"donothack/internal/realip"
 	"donothack/internal/tx"
@@ -51,6 +52,12 @@ type Options struct {
 	BlockBanDuration time.Duration
 	// MaxTarpit 是 tarpit 动作的最长延迟（防止把连接池拖死）。
 	MaxTarpit time.Duration
+
+	// Events 是内存事件存储（控制台的数据源）。nil 表示不记录。
+	//
+	// **只记"有检测结果"的请求**（命中或非放行裁决），不记纯放行的请求 ——
+	// 它是检测事件存储，不是访问日志（访问日志在 audit 里）。
+	Events *eventstore.Store
 }
 
 // Pipeline 实现 http.Handler。
@@ -58,6 +65,9 @@ type Pipeline struct {
 	o Options
 
 	pool sync.Pool
+
+	// blockPage 可被控制台热替换
+	blockPage atomic.Pointer[blockpage.Renderer]
 
 	blockedTotal atomic.Uint64
 	rateLimited  atomic.Uint64
@@ -86,6 +96,14 @@ func (p *Pipeline) Stats() Stats {
 	}
 }
 
+// page 返回当前拦截页渲染器（可被控制台热替换）。
+func (p *Pipeline) page() *blockpage.Renderer {
+	if r := p.blockPage.Load(); r != nil {
+		return r
+	}
+	return p.o.BlockPage
+}
+
 // New 构造流水线。
 func New(o Options) *Pipeline {
 	if o.FailMode == "" {
@@ -102,7 +120,17 @@ func New(o Options) *Pipeline {
 	}
 	pl := &Pipeline{o: o}
 	pl.pool.New = func() any { return &tx.Transaction{} }
+	pl.blockPage.Store(o.BlockPage)
 	return pl
+}
+
+// SetBlockPage 热替换拦截页渲染器（控制台改完拦截页后调用）。
+//
+// 用原子指针：在途请求要么用旧渲染器要么用新的，不会看到半成品。
+func (p *Pipeline) SetBlockPage(r *blockpage.Renderer) {
+	if r != nil {
+		p.blockPage.Store(r)
+	}
 }
 
 // ClientIP 从请求里解析真实客户端 IP（也供审计使用）。
@@ -131,6 +159,9 @@ func (p *Pipeline) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.o.Degrader != nil && p.o.Degrader.ShouldReject() {
 		p.rejected.Add(1)
 		st := p.o.Degrader.Stats()
+		p.record(&tx.Transaction{ID: txIDFrom(rec), ClientIP: ipRes.IP}, engine.Decision{
+			Verdict: tx.VerdictBlock, Mode: "degraded",
+		}, ipRes, http.StatusServiceUnavailable, "检测能力降级："+st.Level)
 		if rec != nil {
 			rec.Verdict = "rejected_degraded"
 			rec.Reason = st.Level + "：" + st.Reason
@@ -161,9 +192,15 @@ func (p *Pipeline) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				rec.Reason = d.Reason
 				rec.Status = status
 			}
+			p.record(&tx.Transaction{ID: txIDFrom(rec), ClientIP: ipRes.IP,
+				Vars: tx.Collections{Method: r.Method, Path: r.URL.Path, Host: r.Host, UserAgent: r.UserAgent()},
+			}, engine.Decision{Verdict: tx.VerdictBlock, Events: []tx.Event{{
+				Category: category, Detail: d.Reason, RuleID: "RATE-LIMIT",
+			}}}, ipRes, status, d.Reason)
+
 			// 封禁/限速是**洪泛路径**：每秒可能几千个请求，
 			// 这里强制走纯文本，不做模板渲染。
-			p.o.BlockPage.Respond(w, r, p.o.BlockPage.NewData(
+			p.page().Respond(w, r, p.page().NewData(
 				r, txIDFrom(rec), category, "", ipRes.IP, status, retry), true)
 			return
 		}
@@ -193,7 +230,7 @@ func (p *Pipeline) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			rec.Err = err.Error()
 		}
 		if p.o.FailMode == "closed" {
-			p.o.BlockPage.Respond(w, r, p.o.BlockPage.NewData(
+			p.page().Respond(w, r, p.page().NewData(
 				r, t.ID, "protocol", "", ipRes.IP, http.StatusServiceUnavailable, 0), true)
 			return
 		}
@@ -215,6 +252,7 @@ func (p *Pipeline) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// ---- 5) 处置 ----
 	switch dec.Verdict {
 	case tx.VerdictDrop:
+		p.record(t, dec, ipRes, 0, dec.Reason)
 		// drop 是最高档：**不回任何响应，直接断连**。
 		// 它对扫描器最不友好（拿不到状态码、拿不到页面、也拿不到规则反馈），
 		// 但正常用户会看到"连接被重置"，所以只该给明确的恶意流量用。
@@ -227,6 +265,7 @@ func (p *Pipeline) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	case tx.VerdictBlock:
 		p.blockedTotal.Add(1)
+		p.record(t, dec, ipRes, dec.Status, dec.Reason)
 		if p.o.BanOnBlock && p.o.Limiter != nil {
 			p.o.Limiter.Ban(ipRes.IP, p.o.BlockBanDuration)
 		}
@@ -234,6 +273,7 @@ func (p *Pipeline) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	case tx.VerdictTarpit:
 		p.tarpitted.Add(1)
+		p.record(t, dec, ipRes, 200, dec.Reason)
 		// 拖时间是对攻击者的成本压制，但**必须有上限**：
 		// 无上限的延迟会把自己的连接池与 goroutine 拖死，那是自伤。
 		p.tarpit(dec)
@@ -243,9 +283,14 @@ func (p *Pipeline) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// 挑战动作需要前端配合（JS + 签名 cookie）。未实现时**降级为拦截**，
 		// 而不是放行 —— 放行等于让 challenge 规则形同不存在。
 		p.blockedTotal.Add(1)
+		p.record(t, dec, ipRes, dec.Status, dec.Reason)
 		p.respondBlocked(w, r, t, dec, ipRes.IP)
 
 	default:
+		// 命中但未达阈值（detect 模式或 log 动作）：记事件但不拦
+		if len(dec.Events) > 0 {
+			p.record(t, dec, ipRes, 200, dec.Reason)
+		}
 		p.forward(w, r)
 	}
 }
@@ -264,6 +309,70 @@ func (p *Pipeline) drop(w http.ResponseWriter) bool {
 	return true
 }
 
+// record 把一次检测结果写进内存事件存储。
+//
+// 只在"有东西可看"时记录：命中过、或裁决不是放行。纯放行请求不进 ring ——
+// 否则 ring 会被正常流量冲掉，真正要看的事件反而留不住。
+func (p *Pipeline) record(t *tx.Transaction, dec engine.Decision, ipRes realip.Result,
+	status int, reason string) {
+	if p.o.Events == nil {
+		return
+	}
+	if len(dec.Events) == 0 && dec.Verdict == tx.VerdictPass {
+		return
+	}
+
+	e := eventstore.Event{
+		TxID:       t.ID,
+		ClientIP:   ipRes.IP,
+		Method:     t.Vars.Method,
+		Host:       t.Vars.Host,
+		Path:       t.Vars.Path,
+		Proto:      t.Vars.Proto,
+		Status:     status,
+		Verdict:    dec.Verdict.String(),
+		Score:      dec.Score,
+		Mode:       dec.Mode,
+		UserAgent:  t.Vars.UserAgent,
+		ProxyChain: ipRes.Chain,
+	}
+	if rs := p.o.Engine.RuleSet(); rs != nil {
+		e.Ruleset = rs.Version
+	}
+	if reason != "" {
+		e.Message = reason
+	}
+	// 主导命中：分数最高的那条（与拦截页上展示的类目保持一致）
+	best := -1
+	for i, ev := range dec.Events {
+		hit := eventstore.HitRef{
+			RuleID: ev.RuleID, Category: ev.Category, Severity: ev.Severity.String(),
+			Target: ev.Target, Detail: ev.Detail, Score: ev.Score,
+		}
+		e.Hits = append(e.Hits, hit)
+		if best < 0 || ev.Score > dec.Events[best].Score {
+			best = i
+		}
+	}
+	if best >= 0 {
+		ev := dec.Events[best]
+		e.RuleID = ev.RuleID
+		e.Category = ev.Category
+		e.Severity = ev.Severity.String()
+		e.Target = ev.Target
+		e.Operator = ev.Operator
+		e.Detail = ev.Detail
+		e.MatchedLen = ev.MatchedLen
+		if len(ev.PayloadBefore) > 0 {
+			e.PayloadBefore = string(ev.PayloadBefore)
+		}
+		if len(ev.PayloadAfter) > 0 {
+			e.PayloadAfter = string(ev.PayloadAfter)
+		}
+	}
+	p.o.Events.Add(e)
+}
+
 // respondBlocked 用拦截页响应。
 func (p *Pipeline) respondBlocked(w http.ResponseWriter, r *http.Request, t *tx.Transaction, dec engine.Decision, ip string) {
 	status := dec.Status
@@ -271,8 +380,8 @@ func (p *Pipeline) respondBlocked(w http.ResponseWriter, r *http.Request, t *tx.
 		status = http.StatusForbidden
 	}
 	category, ruleID := dominantCategory(dec)
-	d := p.o.BlockPage.NewData(r, t.ID, category, ruleID, ip, status, 0)
-	p.o.BlockPage.Respond(w, r, d, false)
+	d := p.page().NewData(r, t.ID, category, ruleID, ip, status, 0)
+	p.page().Respond(w, r, d, false)
 }
 
 // dominantCategory 取分数最高的类目（决定页面上写"命中了什么"）。

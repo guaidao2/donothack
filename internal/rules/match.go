@@ -119,6 +119,8 @@ func (rs *RuleSet) evalRuleSingle(t *tx.Transaction, r *CompiledRule, sc *EvalSc
 				Target:  TargetLabel(plan.Collection, key),
 				Detail:  res.Detail,
 				Matched: len(out),
+				Before:  val,
+				After:   out,
 			}
 			matched = true
 			return false

@@ -15,18 +15,23 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"donothack/internal/audit"
 	"donothack/internal/blockpage"
 	"donothack/internal/config"
+	"donothack/internal/console"
+	"donothack/internal/control"
 	"donothack/internal/degrade"
 	"donothack/internal/engine"
+	"donothack/internal/eventstore"
 	"donothack/internal/parser"
 	"donothack/internal/pipeline"
 	"donothack/internal/profile"
@@ -140,6 +145,10 @@ func run(cfgPath string, checkOnly, printBudget, noRules bool) error {
 	log := logger.App()
 	log.Info("启动", "version", version.Info())
 
+	// 信号上下文尽早建立：控制台与数据面共用它做优雅退出。
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	if printBudget {
 		fmt.Print(budget.String())
 		fmt.Printf("档位来源：%s\n", cfg.ProfileSource)
@@ -181,6 +190,9 @@ func run(cfgPath string, checkOnly, printBudget, noRules bool) error {
 		Categories:       rules.DefaultCategories(),
 		Limits:           parserLimits(cfg),
 		ExpandNestedDocs: true,
+		// 内存事件里保留命中的 payload（可打印化 + 截断），控制台详情页要用。
+		// 审计日志里永远不写 payload，两者是分开的。
+		CapturePayload: cfg.Admin.Enabled,
 	})
 
 	upstream, err := cfg.UpstreamURL()
@@ -249,9 +261,19 @@ func run(cfgPath string, checkOnly, printBudget, noRules bool) error {
 			"file", cfg.BlockPage.File, "err", page.CustomError())
 	}
 
+	// ---- 内存事件存储（控制台的数据源）----
+	var events *eventstore.Store
+	if cfg.Admin.Enabled {
+		events = eventstore.New(eventstore.Options{
+			RingSize:     p.RingBufferSize,
+			PayloadLimit: 4 << 10,
+		})
+	}
+
 	var dataplane http.Handler = fwd
+	var pl *pipeline.Pipeline
 	if !noRules {
-		dataplane = pipeline.New(pipeline.Options{
+		pl = pipeline.New(pipeline.Options{
 			Engine:           eng,
 			Next:             fwd,
 			Logger:           logger,
@@ -262,7 +284,9 @@ func run(cfgPath string, checkOnly, printBudget, noRules bool) error {
 			Degrader:         degrader,
 			BanOnBlock:       cfg.Engine.BanOnBlock,
 			BlockBanDuration: cfg.Engine.BlockBanDuration.D(),
+			Events:           events,
 		})
+		dataplane = pl
 		log.Info("防护组件已就绪",
 			"realip_trusted", resolver.TrustedCount(),
 			"ratelimit", cfg.RateLimit.Enabled,
@@ -271,6 +295,87 @@ func run(cfgPath string, checkOnly, printBudget, noRules bool) error {
 			"degrade", cfg.Engine.Degrade,
 			"block_page_custom", page.UsingCustom(),
 		)
+	}
+
+	// ---- 控制面（所有写操作的唯一入口）----
+	var ctl *control.Control
+	if !noRules {
+		ctl = control.New(control.Options{
+			Initial: &control.State{
+				Version: "v1",
+				Reason:  "启动加载",
+				RuleSet: ruleSet,
+				BlockPage: control.BlockPageState{
+					Options:    page.Options(),
+					CustomHTML: page.Options().CustomHTML,
+					File:       cfg.BlockPage.File,
+					Renderer:   page,
+				},
+				RateLimit: control.RateLimitState{
+					Enabled:      cfg.RateLimit.Enabled,
+					RPS:          float64(cfg.RateLimit.DefaultRPS),
+					Burst:        float64(cfg.RateLimit.DefaultBurst),
+					BanAfterHits: cfg.RateLimit.BanAfterHits,
+					BanWindow:    cfg.RateLimit.BanWindow.D(),
+					BanDuration:  cfg.RateLimit.BanDuration.D(),
+					Whitelist:    cfg.RateLimit.Whitelist,
+				},
+				DisabledRules: map[string]bool{},
+			},
+			Applier: &applier{engine: eng, pipeline: pl, limiter: limiter},
+		})
+	}
+
+	// ---- 控制台（独立端口、独立 mux、不进检测引擎）----
+	if cfg.Admin.Enabled {
+		if ctl == nil {
+			return fmt.Errorf("admin.enabled 需要规则集（不要同时使用 -no-rules）")
+		}
+		cs, initialPW, err := console.New(console.Options{
+			Config:   cfg,
+			Control:  ctl,
+			Events:   events,
+			Limiter:  limiter,
+			Resolver: resolver,
+			Logger:   logger,
+			Version:  version.Version,
+			EventSummary: func() map[string]any {
+				out := map[string]any{}
+				if pl != nil {
+					st := pl.Stats()
+					out["blocked"] = st.Blocked
+					out["rate_limited"] = st.RateLimited
+					out["rejected_503"] = st.Rejected503
+					out["engine_errors"] = st.EngineErrors
+					out["tarpitted"] = st.Tarpitted
+				}
+				if degrader != nil {
+					ds := degrader.Stats()
+					out["degrade_level"] = ds.Level
+					out["degrade_reason"] = ds.Reason
+					out["degrade_reject"] = ds.ShouldReject
+				}
+				return out
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("控制台启动失败：%w", err)
+		}
+		go func() {
+			if err := serveConsole(ctx, cs, logger); err != nil {
+				log.Error("控制台退出", "err", err)
+			}
+		}()
+		log.Info("控制台已启动",
+			"addr", cfg.Admin.Addr, "mount", cs.Mount(),
+			"tls", cfg.Admin.TLS.Enabled, "gate", cfg.Admin.Gate.Enabled)
+		if initialPW != "" {
+			// 初始口令只在这里打印一次，**不写进配置文件**（绝不使用默认口令）。
+			log.Warn("控制台初始登录口令（仅本次启动有效，请立即登录后修改）",
+				"username", firstNonEmpty(cfg.Admin.Username, "admin"),
+				"password", initialPW,
+				"login_url", cs.URL())
+		}
 	}
 
 	srv := server.New(server.Options{
@@ -287,8 +392,6 @@ func run(cfgPath string, checkOnly, printBudget, noRules bool) error {
 		Ruleset:       rulesetSummary(ruleSet),
 	})
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	return srv.Serve(ctx)
 }
 
@@ -536,4 +639,110 @@ func loadBlockPage(cfg *config.Config) (*blockpage.Renderer, error) {
 		}
 	}
 	return blockpage.New(o), nil
+}
+
+// applier 把控制面的新状态推给数据面。
+//
+// 全部是原子替换，**绝不能阻塞** —— 控制台的慢操作不许影响转发。
+type applier struct {
+	engine   *engine.Engine
+	pipeline *pipeline.Pipeline
+	limiter  *ratelimit.Limiter
+}
+
+func (a *applier) ApplyRuleset(rs *rules.RuleSet) {
+	if a.engine != nil {
+		a.engine.Swap(rs)
+	}
+}
+
+func (a *applier) ApplyBlockPage(r *blockpage.Renderer, _ blockpage.Options) {
+	if a.pipeline != nil {
+		a.pipeline.SetBlockPage(r)
+	}
+}
+
+func (a *applier) ApplyRateLimit(st control.RateLimitState) {
+	if a.limiter == nil {
+		return
+	}
+	// 参数不合法时保留旧参数（校验已在控制面做过，这里只兜底）
+	_ = a.limiter.Reconfigure(ratelimit.Options{
+		RPS:          st.RPS,
+		Burst:        st.Burst,
+		BanAfterHits: st.BanAfterHits,
+		BanWindow:    st.BanWindow,
+		BanDuration:  st.BanDuration,
+		Whitelist:    st.Whitelist,
+	})
+}
+
+// serveConsole 在独立端口上跑控制台。
+//
+// 与数据面完全分离：独立监听、独立 mux、独立限流与认证。
+// 控制台流量**不进检测引擎** —— 否则管理员改规则时可能被自己的规则拦掉。
+func serveConsole(ctx context.Context, cs *console.Server, logger *audit.Logger) error {
+	tlsCfg, err := cs.TLSConfig()
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{
+		Addr:              cs.Addr(),
+		Handler:           cs.Handler(),
+		TLSConfig:         tlsCfg,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	// 控制台不做 TLS 时会有敏感凭据走明文，必须显式确认过才允许非本机绑定。
+	if tlsCfg == nil && !isLoopbackAddr(cs.Addr()) && !cs.AllowInsecure() {
+		return fmt.Errorf("控制台绑定在非本机地址 %s 但未启用 TLS；"+
+			"Basic 门槛凭据是 base64 不是加密，请启用 admin.tls 或显式设置 admin.allow_insecure: true", cs.Addr())
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		var e error
+		if tlsCfg != nil {
+			e = srv.ListenAndServeTLS("", "")
+		} else {
+			e = srv.ListenAndServe()
+		}
+		errCh <- e
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return srv.Shutdown(shutCtx)
+	case err := <-errCh:
+		if err == http.ErrServerClosed {
+			return nil
+		}
+		return err
+	}
+}
+
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	host = strings.Trim(host, "[]")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }

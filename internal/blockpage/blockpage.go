@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"html/template"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -90,6 +91,11 @@ var categoryLabels = map[string]string{
 	"":          "安全策略",
 }
 
+// BuiltinTemplate 返回内置模板源码。
+//
+// 暴露它是为了让控制台能展示"默认长什么样"，并提供"恢复默认"。
+func BuiltinTemplate() string { return builtinHTML }
+
 // CategoryLabel 返回类目的友好名称。
 func CategoryLabel(cat string) string {
 	if s, ok := categoryLabels[strings.ToLower(strings.TrimSpace(cat))]; ok {
@@ -126,11 +132,29 @@ func New(o Options) *Renderer {
 		t, err := template.New("custom").Parse(o.CustomHTML)
 		if err != nil {
 			r.customErr = err.Error()
+		} else if err := probeTemplate(t); err != nil {
+			// **解析通过不等于能用**：html/template 只在执行时才检查字段是否存在。
+			// 不试执行的话，`{{.NoSuchField}}` 这种模板会被接受，
+			// 然后每个被拦请求都静默回退内置页 —— 运维以为自己改的东西生效了。
+			r.customErr = err.Error()
 		} else {
 			r.custom = t
 		}
 	}
 	return r
+}
+
+// probeTemplate 用一个样例数据试执行一次模板，把"执行期才会暴露"的错误提前到加载期。
+func probeTemplate(t *template.Template) error {
+	sample := Data{
+		Status: 403, StatusText: "Forbidden", TxID: "01J8ZK3M4N5P", Time: "2026-01-01 00:00:00",
+		Method: "GET", Host: "shop.example.com", Path: "/product/1234",
+		Category: "sqli", CategoryLabel: "SQL 注入", RuleID: "SQLI-4001",
+		ClientIP: "203.0.113.7", Branding: true, ProductName: "donothack",
+		ProductURL: "https://example.com", Contact: "security@example.com",
+		Version: "v1", Title: "请求已被安全策略拦截", RetryAfter: 30,
+	}
+	return t.Execute(io.Discard, sample)
 }
 
 // CustomError 返回自定义模板的编译错误（空串表示没配或编译通过）。

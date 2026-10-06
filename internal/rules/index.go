@@ -137,6 +137,14 @@ type Hit struct {
 	ValIdx  int
 	Detail  string
 	Matched int
+
+	// Before / After 是命中位置的原始值与变换后的值。
+	//
+	// 只存**切片引用**，不复制、不分配 —— 但要注意生命周期：
+	// 它们指向请求的内存，请求结束即失效。需要留存必须当场转成字符串
+	// （eventstore 就是这么做的：入口处做一次可打印化 + 截断）。
+	Before []byte
+	After  []byte
 }
 
 // Reset 清空但保留容量。

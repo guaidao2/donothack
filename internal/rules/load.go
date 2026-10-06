@@ -128,6 +128,12 @@ type Options struct {
 	FileBase string
 	// MinLiteralLen 是进预筛的最小字面量长度（更短的不进自动机）。
 	MinLiteralLen int
+	// DisableIDs 是"从控制台停用"的规则 ID 集合。
+	//
+	// 为什么不做成改文件：规则文件是**可回滚的版本化产物**，
+	// 控制台点一下"停用"就把 YAML 改掉，会让文件与 git 历史对不上。
+	// 停用是运行期决策，放在这里；要永久停用应当去改规则文件。
+	DisableIDs map[string]bool
 }
 
 // DefaultCategories 是内置类目与默认分（docs/DESIGN.md §10.1）。
@@ -173,8 +179,32 @@ func LoadDir(opts Options, dir string, patterns []string) (*RuleSet, error) {
 	return LoadFiles(opts, files)
 }
 
+// fileSource 是一个规则来源（磁盘文件或内存内容）。
+type fileSource struct {
+	name string
+	raw  []byte
+	err  error
+}
+
+// LoadSource 从内存里的 YAML 内容加载规则集。
+//
+// 控制台的"校验规则片段"与"影响预演"需要它：那些内容还没落盘，
+// 但必须走**完全相同**的校验与自测路径 —— 否则"控制台说没问题、加载时才炸"。
+func LoadSource(opts Options, name string, data []byte) (*RuleSet, error) {
+	return loadSources(opts, []fileSource{{name: name, raw: data}})
+}
+
 // LoadFiles 加载并编译指定的规则文件。
 func LoadFiles(opts Options, files []string) (*RuleSet, error) {
+	srcs := make([]fileSource, 0, len(files))
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		srcs = append(srcs, fileSource{name: f, raw: raw, err: err})
+	}
+	return loadSources(opts, srcs)
+}
+
+func loadSources(opts Options, sources []fileSource) (*RuleSet, error) {
 	if opts.Categories == nil {
 		opts.Categories = DefaultCategories()
 	}
@@ -188,8 +218,8 @@ func LoadFiles(opts Options, files []string) (*RuleSet, error) {
 		opts.MinLiteralLen = 3
 	}
 	if opts.FileBase == "" {
-		if len(files) > 0 {
-			opts.FileBase = filepath.Dir(files[0])
+		if len(sources) > 0 {
+			opts.FileBase = filepath.Dir(sources[0].name)
 		} else {
 			opts.FileBase = "."
 		}
@@ -199,24 +229,25 @@ func LoadFiles(opts Options, files []string) (*RuleSet, error) {
 	rs := &RuleSet{
 		LoadedAt: time.Now(),
 		byID:     map[string]*CompiledRule{},
-		Source:   strings.Join(files, ", "),
+		Source:   sourceNames(sources),
 		localities: Stats{
 			ByCategory: map[string]int{},
 			ByPhase:    map[int]int{},
 		},
 	}
-	rs.localities.Files = len(files)
+	rs.localities.Files = len(sources)
 
 	errs := &Errors{}
 	hasher := sha256.New()
 	seenIDs := map[string]SourceRef{}
 
-	for _, file := range files {
-		raw, err := os.ReadFile(file)
-		if err != nil {
-			errs.add("%s：读取失败：%v", file, err)
+	for _, src := range sources {
+		file := src.name
+		if src.err != nil {
+			errs.add("%s：读取失败：%v", file, src.err)
 			continue
 		}
+		raw := src.raw
 		hasher.Write(raw)
 
 		doc, err := parseDoc(file, raw)
@@ -397,6 +428,10 @@ func compileRule(opts Options, doc *yamlDoc, yr yamlRule, ref SourceRef) (*Compi
 	enabled := true
 	if yr.Enabled != nil {
 		enabled = *yr.Enabled
+	}
+	// 控制台停用优先于文件里的 enabled：文件说启用、控制台临时停用 → 停用。
+	if opts.DisableIDs[yr.ID] {
+		enabled = false
 	}
 	msg := strings.TrimSpace(yr.Message)
 	if msg == "" {
@@ -723,4 +758,12 @@ func linkChains(rs *RuleSet, from, to int, errs *Errors) {
 		}
 		i = j + 1
 	}
+}
+
+func sourceNames(srcs []fileSource) string {
+	names := make([]string, 0, len(srcs))
+	for _, s := range srcs {
+		names = append(names, s.name)
+	}
+	return strings.Join(names, ", ")
 }

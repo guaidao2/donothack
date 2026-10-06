@@ -141,6 +141,12 @@ type Event struct {
 	Truncated  bool      `json:"truncated,omitempty"`
 	HardBlock  bool      `json:"hard_block,omitempty"`
 	At         time.Time `json:"at"`
+
+	// PayloadBefore / PayloadAfter 只在引擎开了 CapturePayload 时有值，
+	// 且**只服务内存事件**（控制台详情页展示）。
+	// 审计日志里永远不写它们 —— 日志是长期落盘、可能被同步到别处的东西。
+	PayloadBefore []byte `json:"-"`
+	PayloadAfter  []byte `json:"-"`
 }
 
 // CatScore 是单个类目的累计分。
