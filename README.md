@@ -11,6 +11,13 @@
 **P5 已完成**（tag `v0.7.0-console-wired`）：前端在**真实浏览器**里与后端跑通 ——
 八个页面全部正常渲染、0 个"后端未定义"、payload 以代码模式（纯文本节点）展开。
 联调中修掉 7 处前后端字段契约不一致（详见 docs/CONSOLE.md §13）。
+**P6 进行中**（tag `v0.8.0-perf-gate`）：性能门禁实测通过 —— 相对裸反向代理基线
+**快 28.8%**（35332 vs 27429 rps），RSS 44.2 MiB。首轮 crackweb 验收见
+[ACCEPTANCE.md](docs/ACCEPTANCE.md)：反射型 XSS 归零、SSTI 模板形态全拦，
+残余 1 条裸算术形态已如实记录（请求侧无法与正常算术参数区分）。
+
+未完成项：`BenchmarkEngine_NoMatch` 的 0 allocs/op 门禁（实测 21）、
+真机 2C2G 基线、`/totp/enroll` 与 `/notify`、第二轮完整扫描。
 
 至此 P0–P5 全部完成；P6 首轮验收见 [ACCEPTANCE.md](docs/ACCEPTANCE.md)。
 
