@@ -287,6 +287,9 @@ func (s *Server) routes() {
 	h("/api/v1/config", s.handleConfig)
 	h("/api/v1/config/diff", s.handleConfigDiff)
 	h("/api/v1/config/reload", s.handleConfigReload)
+	// 引擎热参数（模式 / 阈值 / 命中即封禁）：整份 PUT /config 是被有意拒绝的，
+	// 但"应急切模式"必须有页面入口 —— 走这个专用端点，底层同一条 control.Apply。
+	h("/api/v1/engine", s.handleEngine)
 	h("/api/v1/console-audit", s.handleConsoleAudit)
 
 	// 静态资源与 SPA 兜底

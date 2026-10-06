@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -124,7 +123,7 @@ func (s *Server) ServeListener(ctx context.Context, ln net.Listener) error {
 		ReadTimeout:       l.ReadTimeout.D(),
 		WriteTimeout:      l.WriteTimeout.D(),
 		IdleTimeout:       l.IdleTimeout.D(),
-		ErrorLog:          slog.NewLogLogger(s.o.Logger.App().Handler(), slog.LevelWarn),
+		ErrorLog:          newErrorLogger(s.o.Logger),
 	}
 
 	s.ready.Store(true)

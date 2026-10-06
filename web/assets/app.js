@@ -5,7 +5,7 @@
 
 import { installWriteGuards, isDevMode } from './safe.js';
 import { createRouter } from './router.js';
-import { api, onUnauthorized } from './api.js';
+import { api, onUnauthorized, setCSRFToken } from './api.js';
 import { session, ui } from './store.js';
 import {
   el,
@@ -19,6 +19,7 @@ import {
   pick,
   fmtSeconds,
 } from './dom.js';
+import { brandMark, navIcon } from './icons.js';
 import { confirmDialog } from './components/modal.js';
 import { notify } from './components/toast.js';
 
@@ -158,6 +159,10 @@ function bootScreen(text) {
 async function refreshSession() {
   try {
     const payload = await api.session();
+    // CSRF：后端在 /session 里给的是**裸 token**，而 cookie 里存的是带 HMAC 的签名值。
+    // 请求头必须用裸 token（服务端要它等于会话里的值），所以在这里把它存下来 ——
+    // 早期前端直接读 cookie，等于把签名值当 token 发出去，所有写操作都会 403 csrf_mismatch。
+    setCSRFToken(pick(payload, ['csrf', 'csrf_token'], ''));
     session.set({
       status: 'authenticated',
       actor: String(pick(payload, ['actor', 'username', 'user', 'name'], '') || ''),
@@ -250,7 +255,7 @@ function renderLogin(notice) {
         el(
           'div',
           { class: 'gate__hero-top' },
-          el('div', { class: 'gate__hero-brand' }, el('span', { text: 'donothack' })),
+          el('div', { class: 'gate__hero-brand' }, brandMark(30), el('span', { text: 'donothack' })),
           el('h1', { class: 'gate__hero-title', text: '请求侧 Web 应用防火墙' }),
           el('p', {
             class: 'gate__hero-desc',
@@ -341,6 +346,7 @@ function buildSidebar() {
     el(
       'div',
       { class: 'sidebar__brand' },
+      brandMark(26),
       el('span', { class: 'sidebar__brand-name', text: 'donothack' }),
       version
     )
@@ -355,7 +361,7 @@ function buildSidebar() {
         class: 'nav__item',
         attrs: { href: router.href(item.path), 'data-route': '1', 'data-nav': item.path },
       });
-      link.appendChild(el('span', { class: 'nav__dot' }));
+      link.appendChild(navIcon(item.path) || el('span', { class: 'nav__dot' }));
       link.appendChild(el('span', { text: item.label }));
       nav.appendChild(link);
       navNodes.push({ path: item.path, node: link });

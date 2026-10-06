@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -152,6 +153,12 @@ func (n *Notifier) enabled() bool {
 // ValidateWebhook 检查 webhook 地址是否可用（scheme + 出站策略）。
 //
 // 控制台在保存前必须调它，避免"保存时看着成功、真发送时才失败"。
+//
+// 为什么不能只做 netip.ParseAddr：它只认标准四段写法，`127.1`、`0x7f.1`、
+// `2130706433` 这类**非标准但能解析到回环**的写法会被直接跳过（保存成功），
+// 到真正投递时才被 DialContext 拦下 —— 正是这个函数想避免的体验。
+// 所以这里对"不像标准 IP 的主机名"也解析一次，按解析结果判定；
+// 解析不出来但形态像 IP 字面量的，一律 fail-closed。
 func ValidateWebhook(raw string, allowPrivate bool) error {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
@@ -164,13 +171,73 @@ func ValidateWebhook(raw string, allowPrivate bool) error {
 		return fmt.Errorf("webhook 缺少主机名")
 	}
 	host := u.Hostname()
+	pol := egressPolicy{allowPrivate: allowPrivate}
+
 	if ip, err := netip.ParseAddr(host); err == nil {
-		// 直接写 IP：当场判定
-		if reason := (egressPolicy{allowPrivate: allowPrivate}).blockedReason(ip); reason != "" {
+		// 标准 IP 字面量：当场判定
+		if reason := pol.blockedReason(ip); reason != "" {
 			return fmt.Errorf("webhook 目标 %s 属于%s，按出站策略拒绝%s", host, reason, allowPrivateHint)
 		}
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil {
+		if looksLikeIPLiteral(host) {
+			// 形似 IP 却解析不出来：不放过（可能正是靠"解析失败"骗过预检的写法）
+			return fmt.Errorf("webhook 目标 %s 形似 IP 字面量但无法解析，按出站策略拒绝%s",
+				host, allowPrivateHint)
+		}
+		// 普通域名：此刻解析不了多半是 DNS 抖动，不在保存时拦人；运行期还有 DialContext 把关。
+		return nil
+	}
+	allowed := 0
+	lastReason := ""
+	for _, ip := range ips {
+		if reason := pol.blockedReason(ip); reason != "" {
+			lastReason = reason
+			continue
+		}
+		allowed++
+	}
+	if allowed == 0 {
+		if lastReason == "" {
+			lastReason = "没有可用地址"
+		}
+		return fmt.Errorf("webhook 目标 %s 只解析到被出站策略拒绝的地址（%s）%s",
+			host, lastReason, allowPrivateHint)
 	}
 	return nil
+}
+
+// looksLikeIPLiteral 判断主机名是否"长得像 IP 字面量"：
+// 十进制整数（2130706433）、点分十进制（127.1 / 127.0.0.1.）、十六进制（0x7f.1）、含冒号（IPv6 变体）。
+// 真正的域名（哪怕叫 10.example.com）不会命中，因为字母超出了 a-f 与数字的范围。
+func looksLikeIPLiteral(host string) bool {
+	if host == "" {
+		return false
+	}
+	if strings.Contains(host, ":") {
+		return true // IPv6 或 host:port 残留
+	}
+	lower := strings.ToLower(strings.TrimSuffix(host, "."))
+	if strings.HasPrefix(lower, "0x") {
+		rest := strings.TrimPrefix(lower, "0x")
+		for _, r := range rest {
+			if (r < '0' || r > '9') && (r < 'a' || r > 'f') && r != '.' {
+				return false
+			}
+		}
+		return rest != ""
+	}
+	for _, r := range lower {
+		if (r < '0' || r > '9') && r != '.' {
+			return false
+		}
+	}
+	return lower != ""
 }
 
 // Enabled 报告告警是否生效。

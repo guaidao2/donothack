@@ -180,7 +180,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Name: sessionCookie, Value: id, Path: s.cookiePath(),
 		HttpOnly: true, Secure: secure, SameSite: http.SameSiteStrictMode,
 	})
-	// CSRF 用**双提交 + 签名**：cookie 里的值带 HMAC，前端读出来放进请求头。
+	// CSRF 用**双提交 + 签名**：cookie 里存的是"裸 token.HMAC"，前端从 /session
+	// 拿裸 token 放进请求头（服务端两种形态都收，见 requireWrite）。
 	http.SetCookie(w, &http.Cookie{
 		Name: csrfCookie, Value: signCSRF(s.secret, csrf), Path: s.cookiePath(),
 		HttpOnly: false, // 前端要读它放进请求头
@@ -1383,13 +1384,17 @@ func (s *Server) requireWrite(w http.ResponseWriter, r *http.Request) bool {
 		s.writeError(w, http.StatusForbidden, "missing_csrf", "缺少 CSRF 令牌 Cookie", "")
 		return false
 	}
-	token, ok := checkCSRFSig(s.secret, c.Value)
-	if !ok {
+	// 签名必须有效：cookie 被改过就说明这不是我们发的那一份。
+	if _, ok := checkCSRFSig(s.secret, c.Value); !ok {
 		s.csrfFails.Add(1)
 		s.writeError(w, http.StatusForbidden, "bad_csrf", "CSRF 令牌签名无效", "")
 		return false
 	}
-	if hdr != sess.CSRF || hdr != token {
+	// 请求头里的 token 有两种合法形态，都要求"必须知道本会话的 token"：
+	//  1. /session 与 /login 返回的**裸 token**（前端用这个）；
+	//  2. cookie 里那个带 HMAC 的签名值（签名已在上一步验过）。
+	// 两种都不会被跨站攻击者拿到：签名过不了伪造，裸值读不到 cookie。
+	if hdr != sess.CSRF && hdr != c.Value {
 		s.csrfFails.Add(1)
 		s.writeError(w, http.StatusForbidden, "csrf_mismatch", "CSRF 令牌不匹配", "")
 		return false

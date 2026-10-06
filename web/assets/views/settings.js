@@ -6,7 +6,7 @@
 //       GET /status、GET /session。
 // 约束：拿不到的字段一律显示 "—"；没有端点的能力（如 api_token 轮换）明确写成"后端未定义"，不做假按钮。
 
-import { api, backupUrl, warningsOf, snapshotVersionOf } from '../api.js';
+import { api, backupUrl, warningsOf } from '../api.js';
 import { createResource, session } from '../store.js';
 import {
   el,
@@ -19,6 +19,8 @@ import {
   tabs,
   kvList,
   checkbox,
+  field,
+  textInput,
   renderCode,
   bindState,
   pick,
@@ -264,7 +266,9 @@ function authSection(host) {
       title: '修改登录口令',
       description: 'POST /password：修改后其它会话是否失效由后端决定。',
       fields: [
-        { name: 'current_password', label: '当前口令', type: 'password', required: true },
+        // 字段名必须与后端 handlePassword 的 json tag 一致（old_password / new_password）；
+        // 后端是 DisallowUnknownFields 的严格解码，写错名字会直接 400，而不是被静默忽略。
+        { name: 'old_password', label: '当前口令', type: 'password', required: true },
         { name: 'new_password', label: '新口令', type: 'password', required: true },
         { name: 'confirm', label: '再输一次', type: 'password', required: true },
       ],
@@ -273,7 +277,7 @@ function authSection(host) {
       onSubmit: async (values) => {
         if (values.new_password !== values.confirm) throw new Error('两次输入的新口令不一致');
         const result = await api.changePassword({
-          current_password: values.current_password,
+          old_password: values.old_password,
           new_password: values.new_password,
         });
         showWarnings(warningsOf(result));
@@ -501,22 +505,31 @@ function configSection(host) {
       );
 
       const controls = el('div', { class: 'row row--wrap' });
-      if (capture !== null) {
-        controls.appendChild(
-          checkbox('抓取 payload 原文（log.capture_payload）', {
-            checked: !!capture,
-            onChange: (checked) => toggleCapture(resource, payload, checked),
-          })
-        );
-      } else {
-        controls.appendChild(
-          el('span', { class: 'xs faint', text: '配置里没有 log.capture_payload 字段，无法在控制台切换抓取开关。' })
-        );
-      }
-      controls.appendChild(button('编辑配置（JSON）', { size: 'sm', onClick: () => editConfig(resource) }));
+      // payload 原文抓取**不是热改项**（改它要改配置落盘后重启），所以这里只显示状态，
+      // 不给一个点了必然失败的开关 —— 以前那个勾选框调的是 PUT /config，
+      // 而后端有意拒绝整份写配置（405），点了只会得到一个红条。
+      controls.appendChild(
+        el('span', {
+          class: 'sm muted',
+          text:
+            capture === null
+              ? '配置里没有 log.capture_payload 字段。'
+              : 'payload 原文抓取改配置里的 log.capture_payload 后重启生效（不是热改项）。',
+        })
+      );
       controls.appendChild(button('查看与运行中的差异', { size: 'sm', onClick: () => diffRes.load() }));
       controls.appendChild(button('重新加载配置', { size: 'sm', danger: true, onClick: () => reloadConfig(resource) }));
       blocks.push(controls);
+
+      blocks.push(
+        banner('info', '其它配置项改哪里', el('div', {
+          class: 'sm',
+          text:
+            '模式与阈值改上面那张"运行模式"卡；限速走 CC 防护与限速页；拦截页走拦截页；规则走规则管理；' +
+            '监听地址、上游、TLS、real_ip 这些必须改配置落盘后重启 —— 控制台不提供整份写配置，' +
+            '因为静默忽略改不了的字段会让人以为改生效了。',
+        }))
+      );
 
       blocks.push(
         banner('warn', 'payload 抓取的内存与合规影响', el('div', {
@@ -553,54 +566,6 @@ function configSection(host) {
   diffRes.load();
   resource.load();
 
-  async function toggleCapture(res, current, nextValue) {
-    const ok = await confirmDialog({
-      title: nextValue ? '确认开启 payload 抓取' : '确认关闭 payload 抓取',
-      description:
-        nextValue
-          ? '开启后请求原文会被记录：内存与磁盘占用上升，且原文可能含敏感信息。请确认合规允许。'
-          : '关闭后不再记录请求原文，控制台详情页只能看到摘要。',
-      confirmText: nextValue ? '开启' : '关闭',
-      danger: nextValue,
-    });
-    if (!ok) {
-      res.load();
-      return;
-    }
-    try {
-      const next = cloneJson(current);
-      setPath(next, 'log.capture_payload', nextValue);
-      const result = await api.putConfig(next);
-      showWarnings(warningsOf(result));
-      notify.ok('配置已更新' + (snapshotVersionOf(result) ? '（快照 ' + snapshotVersionOf(result) + '）' : ''));
-      await res.load();
-      diffRes.load();
-    } catch (err) {
-      toastError(err, '更新配置失败');
-      res.load();
-    }
-  }
-
-  async function editConfig(res) {
-    const current = res.get().data;
-    if (!current) {
-      notify.warn('还没有读到当前配置');
-      return;
-    }
-    editJsonDialog({
-      title: '编辑运行配置',
-      description: 'PUT /config（带 Preview）：建议先点"查看与运行中的差异"确认改动范围。',
-      value: current,
-      onSave: async (parsed) => {
-        const result = await api.putConfig(parsed);
-        showWarnings(warningsOf(result));
-        notify.ok('配置已更新');
-        await res.load();
-        diffRes.load();
-      },
-    });
-  }
-
   async function reloadConfig(res) {
     const ok = await confirmDialog({
       title: '重新加载配置',
@@ -620,6 +585,129 @@ function configSection(host) {
     }
   }
 }
+
+/* ── 运行模式（引擎热参数） ─────────────────────────────────────
+ *
+ * 这一块是"应急切模式"的入口：攻击已经在打的时候，运维要把 detect 改成 block。
+ * 在此之前页面上根本没有这条路 —— 只能去磁盘改 config.yaml 再点重载，
+ * 而那个"编辑运行配置"对话框点保存必然 405（后端有意拒绝整份写配置）。
+ * 现在走 PUT /engine：与 reload 同一条 control.Apply，校验失败会回滚并如实报错。
+ */
+
+const ENGINE_MODES = [
+  { key: 'detect', label: 'detect 只记录' },
+  { key: 'block', label: 'block 拦截' },
+  { key: 'mixed', label: 'mixed 按类目' },
+];
+
+function engineSection(host) {
+  const res = createResource(() => api.engine());
+  const body = el('div', { class: 'stack-3' });
+  host.appendChild(card({ title: '运行模式', hint: 'GET / PUT /engine', body: body }));
+
+  let draftMode = null;
+
+  bindState(body, res, {
+    loadingTitle: '读取引擎参数…',
+    onRetry: () => res.load(),
+    empty: { title: '后端未返回引擎参数' },
+    render: (payload) => {
+      const mode = String(pick(payload, ['mode'], '') || '');
+      const threshold = pick(payload, ['inbound_anomaly_threshold', 'threshold'], null);
+      const banOnBlock = pick(payload, ['ban_on_block'], null);
+      const current = draftMode || mode;
+
+      const modeRow = tabs(ENGINE_MODES, {
+        active: current,
+        onSelect: (key) => {
+          draftMode = key;
+          res.load();
+        },
+      });
+      modeRow.classList.add('tabs--segmented');
+
+      const thresholdInput = textInput({
+        name: 'engine-threshold',
+        type: 'number',
+        value: threshold === null ? '' : String(threshold),
+      });
+      thresholdInput.min = '1';
+
+      const apply = button('应用', {
+        tone: 'primary',
+        size: 'sm',
+        onClick: async () => {
+          const next = { mode: current };
+          const th = Number(thresholdInput.value);
+          if (Number.isFinite(th) && th >= 1 && th !== threshold) next.inbound_anomaly_threshold = th;
+          // 切到会拦的模式是"立刻开始 403"的语义变化，必须让人确认一次。
+          if (current !== mode && (current === 'block' || current === 'mixed')) {
+            const okToSwitch = await confirmDialog({
+              title: '切换到 ' + current + ' 模式',
+              description:
+                '切换后达到阈值的请求会立刻被拦截（403）。建议先确认规则集没有误报：' +
+                '在 detect 模式下看一眼"攻击事件"里的命中情况再切。',
+              confirmText: '切换并生效',
+              danger: true,
+            });
+            if (!okToSwitch) return;
+          }
+          try {
+            const result = await api.setEngine(next);
+            showWarnings(warningsOf(result));
+            notify.ok('运行模式已更新为 ' + String(pick(result, ['mode'], current)));
+            draftMode = null;
+            await res.load();
+          } catch (err) {
+            toastError(err, '切换失败（当前运行参数未改变）');
+          }
+        },
+      });
+      if (current === mode) apply.disabled = false;
+
+      const rows = [
+        { k: '当前生效', v: badge(mode || '未知', mode === 'block' ? 'danger' : mode === 'mixed' ? 'warn' : 'neutral') },
+        {
+          k: '命中即封禁',
+          v: banOnBlock === null ? null : badge(banOnBlock ? '已开启' : '已关闭', banOnBlock ? 'warn' : 'neutral'),
+        },
+      ];
+
+      return [
+        el(
+          'div',
+          { class: 'stack-3' },
+          modeRow,
+          el(
+            'div',
+            { class: 'row row--wrap' },
+            field('入站阈值（分数达到就拦）', thresholdInput, '默认 5；弱信号加起来才够，单条弱规则不会拦'),
+            el('div', { class: 'row' }, apply)
+          )
+        ),
+        kvList(rows.filter((r) => r.v !== null)),
+        banner(
+          'info',
+          '三种模式的区别',
+          el('div', {
+            class: 'sm',
+            text:
+              'detect：全部只记录，不拦任何请求（上线初期用这个看误报）。' +
+              'block：总分达到入站阈值就拦。mixed：按类目分别设阈值，某一类自己达标就拦（需在 config.yaml 里配 category_thresholds）。',
+          })
+        ),
+      ];
+    },
+  });
+
+  res.load();
+}
+
+/** editConfig 曾经在这里提供一个"编辑整份配置并保存"的对话框 —— 那条路点不通：
+ *  后端有意拒绝 PUT /config（见 api_config.go 顶部：大部分配置项改了必须重启，
+ *  静默忽略会让人以为改生效了），接口返回 405 并指路到各专用端点。
+ *  所以这里不再提供整份编辑：能热改的走各自的专用入口，改不了的一律如实说"要重启"。
+ */
 
 /* ── 备份 ───────────────────────────────────────────────────── */
 
@@ -833,7 +921,11 @@ export function render(container) {
     if (key === 'gate') gateSection(host);
     else if (key === 'auth') authSection(host);
     else if (key === 'notify') notifySection(host);
-    else if (key === 'config') configSection(host);
+    else if (key === 'config') {
+      // 运行模式（引擎热参数）是这张标签页里最要紧的入口：应急切 detect → block。
+      engineSection(host);
+      configSection(host);
+    }
     else if (key === 'backup') backupSection(host);
     else aboutSection(host);
   }

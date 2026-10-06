@@ -148,6 +148,12 @@ func TestValidateWebhook(t *testing.T) {
 		"http://169.254.169.254/latest/meta-data/",
 		"http://10.1.2.3/hook",
 		"http://",
+		// 非标准但能解析到回环的写法：预检必须拦住，否则会"保存成功、投递才失败"。
+		"http://127.1/hook",
+		"http://127.0.0.1./hook",
+		"http://2130706433/hook",
+		"http://0x7f.0.0.1/hook",
+		"http://[::1]/hook",
 	}
 	for _, u := range bad {
 		if err := ValidateWebhook(u, false); err == nil {

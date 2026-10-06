@@ -1,0 +1,107 @@
+package console
+
+import (
+	"net/http"
+	"time"
+
+	"donothack/internal/control"
+)
+
+// 本文件实现引擎热参数的读写入口：GET / PUT /api/v1/engine。
+//
+// 为什么单开一个端点，而不是让前端去 PUT /config：
+// WAF 的配置里大部分项改不了（监听、上游、TLS、real_ip 都要重建组件），
+// 所以整份 PUT /config 是被**有意拒绝**的（见 api_config.go 顶部）。
+// 但"切模式"偏偏是运维最常用的动作 —— 发现攻击已经在打，要把 detect 立刻改成 block。
+// 在这之前，控制台页面上根本没有入口：只能去磁盘改 config.yaml 再点重载，
+// 而"编辑运行配置"那个对话框点保存必然 405 —— 一条走不通的死路。
+//
+// 这里给引擎参数一个专用入口，走与 reload 完全相同的 control.Apply：
+// 校验 → 审计 → 原子替换 → 失败回滚，改不了的东西绝不静默忽略。
+
+func (s *Server) handleEngine(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.engineRead(w)
+	case http.MethodPut, http.MethodPost:
+		s.engineWrite(w, r)
+	default:
+		s.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "只支持 GET 与 PUT", "")
+	}
+}
+
+func (s *Server) engineRead(w http.ResponseWriter) {
+	snap := s.o.Control.Snapshot()
+	if snap == nil {
+		s.writeError(w, http.StatusServiceUnavailable, "no_snapshot", "控制面尚未初始化", "")
+		return
+	}
+	writeJSON(w, http.StatusOK, enginePayload(snap.Engine))
+}
+
+// enginePayload 是给前端的统一形状：字段名与 control.SetEngine 的入参一致，
+// 免得前端在两个页面里各拼一套。
+func enginePayload(e control.EngineState) map[string]any {
+	cats := map[string]int{}
+	for k, v := range e.CategoryThresholds {
+		cats[k] = v
+	}
+	return map[string]any{
+		"ok":                        true,
+		"mode":                      e.Mode,
+		"inbound_anomaly_threshold": e.InboundThreshold,
+		"category_thresholds":       cats,
+		"ban_on_block":              e.BanOnBlock,
+		"block_ban_duration_s":      int(e.BlockBanDuration.Seconds()),
+	}
+}
+
+func (s *Server) engineWrite(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWrite(w, r) {
+		return
+	}
+	var req struct {
+		// 指针表示"这次要改它"；nil = 保持不动。与 control.SetEngine 的约定一致。
+		Mode               *string        `json:"mode"`
+		InboundThreshold   *int           `json:"inbound_anomaly_threshold"`
+		CategoryThresholds map[string]int `json:"category_thresholds"`
+		BanOnBlock         *bool          `json:"ban_on_block"`
+		BlockBanDurationS  *int           `json:"block_ban_duration_s"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON", err.Error())
+		return
+	}
+	if req.Mode == nil && req.InboundThreshold == nil && req.CategoryThresholds == nil &&
+		req.BanOnBlock == nil && req.BlockBanDurationS == nil {
+		// 一个字段都没给：当成读操作回答，而不是"改成功" ——
+		// 静默成功会让"我明明点保存了"变成一个查不出来的错觉。
+		s.engineRead(w)
+		return
+	}
+
+	mut := control.SetEngine{
+		Mode:             req.Mode,
+		InboundThreshold: req.InboundThreshold,
+		BanOnBlock:       req.BanOnBlock,
+	}
+	if req.CategoryThresholds != nil {
+		mut.CategoryThresholds = req.CategoryThresholds
+	}
+	if req.BlockBanDurationS != nil {
+		d := time.Duration(*req.BlockBanDurationS) * time.Second
+		mut.BlockBanDuration = &d
+	}
+
+	sess, _ := s.currentSession(r)
+	next, warnings, err := s.o.Control.Apply(mut, actorOf(sess, r), s.clientIP(r))
+	if err != nil {
+		// 校验不过 ⇒ 控制面保持旧状态，数据面完全没动。这里要如实说清"没改"。
+		s.writeError(w, http.StatusUnprocessableEntity, "apply_failed",
+			"引擎参数应用失败，已回滚（当前运行参数未改变）", err.Error())
+		return
+	}
+	out := enginePayload(next.Engine)
+	out["warnings"] = warnings
+	writeJSON(w, http.StatusOK, out)
+}

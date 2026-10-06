@@ -51,3 +51,6 @@ config.local.yaml
 # （产品说明以 README.md 为准；这里放的是设计稿、性能预算、控制台设计、
 #   规则 DSL 规格、验收记录与安全审计记录）
 /docs/
+
+# codegraph 的本地索引（工具产物，不进版本库）
+/.codegraph/

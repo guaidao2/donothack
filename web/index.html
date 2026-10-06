@@ -26,6 +26,17 @@
     <link rel="stylesheet" href="assets/styles/components.css" />
   </head>
   <body>
+    <!-- 品牌标记用的渐变：只定义一次，供侧栏与登录页的 url(#dn-mark) 引用。
+         放在 HTML 而不是 JS 里，是为了避免同一 id 被两个实例重复定义。 -->
+    <svg class="svg-defs" aria-hidden="true" focusable="false" width="0" height="0">
+      <defs>
+        <linearGradient id="dn-mark" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#b3a6ff" />
+          <stop offset="55%" stop-color="#7c6cff" />
+          <stop offset="100%" stop-color="#5a35d6" />
+        </linearGradient>
+      </defs>
+    </svg>
     <div id="app-root">
       <div class="boot-screen">控制台启动中，正在检查会话…</div>
     </div>

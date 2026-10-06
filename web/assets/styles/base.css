@@ -133,15 +133,18 @@ kbd {
   border-bottom: 1px solid var(--border-soft);
 }
 
-/* 品牌标记：一小块带渐变的圆角方块 + 外发光。纯 CSS，不用图片也不用图标字体。 */
-.sidebar__brand::before {
-  content: "";
+/* 品牌标记是内联 SVG（见 icons.js），跨两行落在文字左边 */
+.sidebar__brand > .brand-mark {
   grid-row: 1 / span 2;
-  width: 26px;
-  height: 26px;
-  border-radius: 9px;
-  background: linear-gradient(145deg, var(--accent), color-mix(in srgb, var(--accent) 60%, #4c1d95));
-  box-shadow: var(--glow);
+  filter: drop-shadow(0 4px 12px var(--accent-ring));
+}
+
+/* 品牌渐变定义容器：只放 <defs>，不占布局 */
+.svg-defs {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
 }
 
 .sidebar__brand-name {
@@ -217,6 +220,20 @@ kbd {
   height: 15px;
   border-radius: 999px;
   background: var(--accent);
+}
+
+/* 导航图标（内联 SVG）：颜色跟 currentColor 走，选中态更亮 */
+.nav__icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  opacity: 0.72;
+  transition: opacity var(--dur) var(--ease);
+}
+
+.nav__item:hover .nav__icon,
+.nav__item[aria-current="page"] .nav__icon {
+  opacity: 1;
 }
 
 .nav__dot {
@@ -502,13 +519,8 @@ kbd {
   letter-spacing: -0.2px;
 }
 
-.gate__hero-brand::before {
-  content: "";
-  width: 30px;
-  height: 30px;
-  border-radius: 10px;
-  background: linear-gradient(145deg, #8b7cff, #4c1d95);
-  box-shadow: 0 8px 24px rgba(124, 108, 255, 0.5);
+.gate__hero-brand > .brand-mark {
+  filter: drop-shadow(0 8px 22px rgba(124, 108, 255, 0.5));
 }
 
 .gate__hero-title {

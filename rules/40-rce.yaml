@@ -510,3 +510,58 @@ rules:
         - "Order reference O:4: has been confirmed"
         - "please load the configuration file"
         - "aGVsbG8gd29ybGQ="
+
+  - id: RCE-6012
+    phase: 2
+    severity: high
+    category: rce
+    score: 5
+    message: "脚本代码出现在请求头/参数/路径里（日志投毒与代码注入特征）"
+    tags: [rce, log-poisoning, code-execution]
+    # 为什么单独一条规则、而且要看请求头：
+    # 「把 PHP 写进 User-Agent/Referer/URL，等应用把访问日志 include 进来」是
+    # 日志投毒到 RCE 的经典链路，而它的第一跳**只出现在请求元数据里**。
+    # RCE-6007 只覆盖 ARGS 与请求体，UA/Referer/Cookie/路径一个都不看，
+    # 于是这条链的第一跳可以从旁边走过去。这里补上那几个集合。
+    #
+    # 打分 5（强信号）：正常流量不会在请求头里出现 `<?php`、`eval($_`、`$_POST[`。
+    targets:
+      - collection: REQUEST_HEADERS
+      - collection: REQUEST_COOKIES
+      - collection: ARGS
+      - collection: REQUEST_PATH
+    transforms:
+      - urlDecode
+      - urlDecode
+      - compressWhitespace
+      - lowercase
+    operator:
+      name: pm
+      params:
+        patterns:
+          - "<?php"
+          - "<?="
+          - "<%@"
+          - "eval($_"
+          - "assert($_"
+          - "system($_"
+          - "passthru($_"
+          - "shell_exec($_"
+          - "base64_decode($_"
+          - "$_post["
+          - "$_get["
+          - "$_request["
+          - "$_server["
+    test:
+      positive:
+        - "<?php system($_GET['cmd']); ?>"
+        - "<?=phpinfo();?>"
+        - "eval($_POST['a']);"
+        - "<%@ page import=\"java.util.*\" %>"
+        - "<?php @eval($_POST[cmd]);?>"
+      negative:
+        - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+        - "https://example.com/landing?utm_source=newsletter"
+        - "session=8f2b1c9d; theme=dark; lang=zh-CN"
+        - "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif"
+        - "gzip, deflate, br"

@@ -59,8 +59,17 @@ export function readCookie(name) {
   return '';
 }
 
+// CSRF 的**裸 token**由 /session 与 /login 的响应体给出（app.js 在会话刷新时存进来）。
+// cookie 里那个值是"裸 token.HMAC"，服务端要求请求头等于裸 token ——
+// 早期这里只读 cookie，于是所有写操作都会 403 csrf_mismatch。
+let csrfRawToken = '';
+
+export function setCSRFToken(token) {
+  csrfRawToken = typeof token === 'string' ? token : '';
+}
+
 function csrfToken() {
-  return readCookie(CSRF_COOKIE);
+  return csrfRawToken || readCookie(CSRF_COOKIE);
 }
 
 export function buildQuery(params) {
@@ -283,6 +292,10 @@ export const api = {
   changePassword: (body) => request('/password', { method: 'POST', body: body }),
   enrollTotp: (body) => request('/totp/enroll', { method: 'POST', body: body || {} }),
 
+  /* 引擎热参数（模式 / 阈值 / 命中即封禁）：整份 PUT /config 被后端有意拒绝，改这些走专用端点 */
+  engine: () => request('/engine'),
+  setEngine: (body) => request('/engine', { method: 'PUT', body: body }),
+
   /* 门槛 */
   gate: () => request('/gate'),
   rotateGate: (body) => request('/gate/rotate', { method: 'POST', body: body || {} }),
@@ -326,7 +339,9 @@ export const api = {
 
   /* 配置 */
   config: () => request('/config'),
-  putConfig: (body) => request('/config', { method: 'PUT', body: body }),
+  // 刻意没有 putConfig：后端**有意拒绝**整份写配置（大部分项改了必须重启，
+  // 静默忽略会让人以为改生效了），它会回 405 并指路到各专用端点。
+  // 能热改的走 PUT /engine、PUT /ratelimit、PUT /block-page、POST /rulesets/reload。
   configDiff: () => request('/config/diff'),
   reloadConfig: () => request('/config/reload', { method: 'POST' }),
 
