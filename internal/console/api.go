@@ -3,7 +3,10 @@ package console
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"path/filepath"
+	"runtime"
+	"runtime/metrics"
 	"sort"
 	"strings"
 	"sync"
@@ -152,22 +155,32 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSession 返回当前会话状态（前端启动时问一次）。
+//
+// **未登录时返回 401，而不是 200 + `authenticated:false`。**
+// 这条契约踩过一次：前端按"401 = 未登录"判断（与其它所有端点一致），
+// 而这里先返回的是 200，于是前端以为已登录、去挂载仪表盘、吃到一串 401，
+// 首屏就显示"会话已过期"。保持全站一个约定比省一个状态码重要。
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.currentSession(r)
 	if !ok {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"authenticated": false,
-			"version":       s.o.Version,
-		})
+		s.writeError(w, http.StatusUnauthorized, "unauthenticated", "尚未登录", "")
 		return
 	}
+	idle := s.o.Config.Admin.SessionIdleTimeout.D()
+	if idle <= 0 {
+		idle = 2 * time.Hour
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"authenticated": true,
-		"user":          sess.User,
-		"csrf":          sess.CSRF,
-		"expires_at":    sess.Expires.Format(time.RFC3339),
-		"version":       s.o.Version,
-		"snapshot":      s.snapshotVersion(),
+		"authenticated":  true,
+		"user":           sess.User,
+		"username":       sess.User,
+		"actor":          sess.User,
+		"csrf":           sess.CSRF,
+		"expires_at":     sess.Expires.Format(time.RFC3339),
+		"idle_timeout_s": int(idle.Seconds()),
+		"totp_enabled":   s.o.Config.Admin.TOTPEnabled,
+		"version":        s.o.Version,
+		"snapshot":       s.snapshotVersion(),
 	})
 }
 
@@ -222,20 +235,84 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if !s.requireRead(w, r) {
 		return
 	}
+	// 这个响应的字段名是**对着前端 dashboard 的取值写的**（前端用 pick() 做了容错，
+	// 但容错不等于给全：缺字段会显示成 "—"，运维看不出是没数据还是坏了）。
+	// 所以这里把顶层的、嵌套的、以及别名一并给全。
 	out := map[string]any{
+		"status":   "ok",
 		"version":  s.o.Version,
 		"now":      nowISO(),
 		"snapshot": s.snapshotVersion(),
 		"mount":    s.mount,
+		"num_cpu":  runtime.NumCPU(),
+		// GOMAXPROCS 与 NumCPU 不一定相等（可能被环境变量限制），要如实报。
+		"gomaxprocs":     runtime.GOMAXPROCS(0),
+		"goroutines":     runtime.NumGoroutine(),
+		"uptime_seconds": 0.0,
+		"uptime_s":       0.0,
 	}
+
+	// 就绪信息（档位、内存上限、上游健康、运行时长、日志计数）
 	if s.o.ReadyInfo != nil {
 		for k, v := range s.o.ReadyInfo() {
 			out[k] = v
 		}
 	}
-	if s.o.EventSummary != nil {
-		out["dataplane"] = s.o.EventSummary()
+	if v, ok := out["uptime_seconds"].(float64); ok {
+		out["uptime_s"] = v
 	}
+	// 前端取的是 upstream_healthy / upstream.ok，而 /readyz 给的是 upstream_ok。
+	// 补一个同义字段，别让运维对着 "—" 猜。
+	if ok, exists := out["upstream_ok"]; exists {
+		out["upstream_healthy"] = ok
+	}
+	if url, ok := out["upstream"].(string); ok {
+		out["upstream_url"] = url
+	}
+
+	// 内存：给出 used / peak / budget 三者（前端按 memory.* 取值）
+	used, peak := heapUsage()
+	budgetBytes := int64(0)
+	if v, ok := out["budget_target_mib"].(float64); ok {
+		budgetBytes = int64(v * 1024 * 1024)
+	}
+	out["memory"] = map[string]any{
+		"used_bytes":   used,
+		"peak_bytes":   peak,
+		"budget_bytes": budgetBytes,
+	}
+	out["memory_used_bytes"] = used
+	out["memory_peak_bytes"] = peak
+	out["memory_budget_bytes"] = budgetBytes
+
+	// 检测模式与降级
+	out["mode"] = s.o.Config.Engine.Mode
+	out["fail_mode"] = s.o.Config.Engine.FailMode
+	out["degrade"] = s.o.Config.Engine.Degrade
+
+	if s.o.EventSummary != nil {
+		dp := s.o.EventSummary()
+		out["dataplane"] = dp
+		// 降级档位同时给顶层与 overload 对象，前端两种写法都能取到
+		if lvl, ok := dp["degrade_level"]; ok {
+			out["degrade_level"] = lvl
+			// overload.level 必须是**数字**：控制台拿它做数值比较（0=正常）。
+			// 给字符串会让它判成 null，于是正常状态被显示成"系统处于降级状态 L?"。
+			out["overload"] = map[string]any{
+				"level":      dp["degrade_level_num"],
+				"level_name": lvl,
+				"reason":     dp["degrade_reason"],
+				"rejected":   dp["rejected_503"],
+			}
+		}
+		if r, ok := dp["degrade_reason"]; ok {
+			out["degrade_reason"] = r
+		}
+		if rj, ok := dp["rejected_503"]; ok {
+			out["degrade_rejected"] = rj
+		}
+	}
+
 	if s.o.Limiter != nil {
 		st := s.o.Limiter.Stats()
 		out["ratelimit"] = map[string]any{
@@ -244,6 +321,19 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"evicted": st.Evicted, "bans_issued": st.BansIssued,
 		}
 	}
+
+	if s.o.Events != nil {
+		sum := s.o.Events.Summary()
+		out["events"] = sum
+		out["events_total"] = sum.Total
+		out["blocked_total"] = sum.Blocked
+		out["by_category"] = sum.ByCategory
+		out["categories"] = s.o.Events.CategoriesSorted()
+		out["top_ips"] = s.o.Events.TopIPs(10)
+		out["top_paths"] = s.o.Events.TopPaths(10)
+		out["top_rules"] = s.o.Events.TopRules(10)
+	}
+
 	if st := s.o.Control; st != nil {
 		if snap := st.Snapshot(); snap != nil {
 			out["config_version"] = snap.Version
@@ -252,13 +342,28 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			if snap.RuleSet != nil {
 				rs := snap.RuleSet.Stats()
 				out["ruleset"] = map[string]any{
-					"version": snap.RuleSet.Version, "rules": rs.Rules, "enabled": rs.Enabled,
-					"chains": rs.Chains, "prefilter_nodes": rs.PrefilterNodes,
-					"no_literal": rs.NoLiteralRules,
+					"version":         snap.RuleSet.Version,
+					"rules":           rs.Rules,
+					"count":           rs.Rules,
+					"enabled":         rs.Enabled,
+					"disabled":        rs.Disabled,
+					"chains":          rs.Chains,
+					"prefilter_nodes": rs.PrefilterNodes,
+					"no_literal":      rs.NoLiteralRules,
+					"loaded_at":       snap.RuleSet.LoadedAt.Format(time.RFC3339),
+					"warnings":        rs.Warnings,
 				}
+				out["ruleset_version"] = snap.RuleSet.Version
+				out["rule_count"] = rs.Rules
+			}
+			out["exceptions"] = len(snap.Exceptions)
+			out["ip_lists"] = map[string]any{
+				"allow": len(snap.IPLists.Allow),
+				"deny":  len(snap.IPLists.Deny),
 			}
 		}
 	}
+
 	out["console"] = map[string]any{
 		"sessions":     s.session.count(),
 		"logins":       s.logins.Load(),
@@ -268,6 +373,31 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"blocked":      s.blockedReqs.Load(),
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// heapUsage 返回堆在用与峰值字节数。
+//
+// 用 runtime/metrics 而不是 runtime.MemStats：后者要 stop-the-world，
+// 控制台刷新频率可能不低，不该为了显示一个数字去停世界。
+func heapUsage() (used, peak int64) {
+	samples := []metrics.Sample{
+		{Name: "/memory/classes/heap/objects:bytes"},
+		{Name: "/memory/classes/heap/unused:bytes"},
+		{Name: "/memory/classes/heap/released:bytes"},
+		{Name: "/memory/classes/heap/free:bytes"},
+	}
+	metrics.Read(samples)
+	get := func(s metrics.Sample) int64 {
+		if s.Value.Kind() == metrics.KindUint64 {
+			return int64(s.Value.Uint64())
+		}
+		return 0
+	}
+	used = get(samples[0])
+	// "峰值"这里用堆的保留量（objects+unused+released+free）近似：
+	// 真正的历史峰值需要自己采样维护，控制台只要一个量级参考。
+	peak = used + get(samples[1]) + get(samples[2]) + get(samples[3])
+	return used, peak
 }
 
 func (s *Server) handleMetricsSummary(w http.ResponseWriter, r *http.Request) {
@@ -335,28 +465,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if max := s.o.Config.Admin.Events.MaxRows; max > 0 && limit > max {
 		limit = max
 	}
-	query := eventstore.Query{
-		Cursor:       q.Get("cursor"),
-		Limit:        limit,
-		Verdict:      q.Get("verdict"),
-		Category:     q.Get("category"),
-		Severity:     q.Get("severity"),
-		ClientIP:     q.Get("client_ip"),
-		RuleID:       q.Get("rule_id"),
-		PathContains: q.Get("path"),
-		Search:       q.Get("q"),
-		OnlyBlocked:  q.Get("blocked") == "1" || q.Get("blocked") == "true",
-	}
-	if v := q.Get("since"); v != "" {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
-			query.Since = t
-		}
-	}
-	if v := q.Get("until"); v != "" {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
-			query.Until = t
-		}
-	}
+	query := eventQueryFrom(q, limit)
 	list, next := s.o.Events.List(query)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"events":      list,
@@ -859,8 +968,12 @@ func (s *Server) handleRateLimit(w http.ResponseWriter, r *http.Request) {
 				"rps":            snap.RateLimit.RPS,
 				"burst":          snap.RateLimit.Burst,
 				"ban_after_hits": snap.RateLimit.BanAfterHits,
+				// 可读形式与秒数都给：控制台按秒数格式化，
+				// 只给 "2m0s" 这种字符串它会显示成 "—"。
 				"ban_window":     snap.RateLimit.BanWindow.String(),
+				"ban_window_s":   int(snap.RateLimit.BanWindow.Seconds()),
 				"ban_duration":   snap.RateLimit.BanDuration.String(),
+				"ban_duration_s": int(snap.RateLimit.BanDuration.Seconds()),
 				"whitelist":      snap.RateLimit.Whitelist,
 			}
 		}
@@ -970,6 +1083,15 @@ func (s *Server) handleBanByIP(w http.ResponseWriter, r *http.Request) {
 // 绝不返回 password_hash / api_token / gate.password_hash ——
 // 控制台读接口可能被低权限查看，凭据哈希也不该出现在浏览器里。
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	// PUT 直接拒绝并指路：通用配置写入会静默忽略"改不了"的字段，
+	// 运维以为改生效了、实际要重启 —— 这种接口比没有更糟。
+	if r.Method == http.MethodPut || r.Method == http.MethodPatch {
+		if !s.requireWrite(w, r) {
+			return
+		}
+		s.handleConfigPut(w, r)
+		return
+	}
 	if !s.requireRead(w, r) {
 		return
 	}
@@ -1028,11 +1150,52 @@ func (s *Server) handleConsoleAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit := queryInt(r, "limit", 100)
-	out := map[string]any{
-		"changes": s.o.Control.Ops(limit),
-		"auth":    authEvents(limit),
+	changes := s.o.Control.Ops(limit)
+	auth := authEvents(limit)
+
+	// 控制台读的是 audit / items / data / records 之一，并且期望每行有
+	// actor/action/at/ok 这些统一字段。这里把"配置变更"与"登录等认证事件"
+	// 合并成一个按时间倒序的列表 —— 运维想看的是"这个控制台被人动过什么"，
+	// 而不是分成两张表自己去对。
+	type auditRow struct {
+		At          time.Time `json:"at"`
+		Actor       string    `json:"actor"`
+		Action      string    `json:"action"`
+		Target      string    `json:"target,omitempty"`
+		OK          bool      `json:"ok"`
+		Remote      string    `json:"remote,omitempty"`
+		Detail      string    `json:"detail,omitempty"`
+		Error       string    `json:"error,omitempty"`
+		FromVersion string    `json:"from_version,omitempty"`
+		ToVersion   string    `json:"to_version,omitempty"`
+		Warnings    []string  `json:"warnings,omitempty"`
+		Kind        string    `json:"kind"`
 	}
-	writeJSON(w, http.StatusOK, out)
+	rows := make([]auditRow, 0, len(changes)+len(auth))
+	for _, c := range changes {
+		rows = append(rows, auditRow{
+			At: c.At, Actor: c.Actor, Action: c.Action, OK: c.OK, Remote: c.Remote,
+			Detail: c.Detail, Error: c.Error, FromVersion: c.From, ToVersion: c.To,
+			Warnings: c.Warnings, Kind: "change",
+		})
+	}
+	for _, a := range auth {
+		rows = append(rows, auditRow{
+			At: a.At, Actor: a.Actor, Action: a.Action, OK: a.OK, Remote: a.Remote,
+			Detail: a.Detail, Kind: "auth",
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].At.After(rows[j].At) })
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":   rows,
+		"audit":   rows,
+		"changes": changes,
+		"auth":    auth,
+	})
 }
 
 // ---------------------------------------------------------------- 内部工具
@@ -1196,4 +1359,34 @@ func blockPageVariables() []map[string]string {
 		{"name": "Version", "desc": "构建版本"},
 		{"name": "Branding", "desc": "是否展示品牌（true/false）"},
 	}
+}
+
+// eventQueryFrom 把查询参数翻译成事件查询条件。
+//
+// 抽出来是让 /events 与 /events/export 用**同一套**过滤语义 ——
+// 两边各写一遍，导出出来的东西迟早和页面上看到的不是一回事。
+func eventQueryFrom(q url.Values, limit int) eventstore.Query {
+	query := eventstore.Query{
+		Cursor:       q.Get("cursor"),
+		Limit:        limit,
+		Verdict:      q.Get("verdict"),
+		Category:     q.Get("category"),
+		Severity:     q.Get("severity"),
+		ClientIP:     q.Get("client_ip"),
+		RuleID:       q.Get("rule_id"),
+		PathContains: q.Get("path"),
+		Search:       q.Get("q"),
+		OnlyBlocked:  q.Get("blocked") == "1" || q.Get("blocked") == "true",
+	}
+	if v := q.Get("since"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			query.Since = t
+		}
+	}
+	if v := q.Get("until"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			query.Until = t
+		}
+	}
+	return query
 }

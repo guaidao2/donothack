@@ -274,3 +274,32 @@ P0 完成。下一步 P1（解析层：路径规范化、解码链、参数提�
   未拦截；已做到"可见不误伤"。治本需要响应侧检测，而本项目按设计只做请求侧。
 - `exposed-path`（swagger 暴露）、`passive-*`（缓存头/Cookie 属性/安全头/明文传输）
   属应用与传输层问题，给了定位与处置建议。
+
+## [2026-10-06] P5 前端联调与 P4 端点补齐（tag `v0.7.0-console-wired`）
+
+### 新增
+- `/events/export`（JSONL / CSV，CSV 带 BOM）、`/rulesets`、`/gate` + `/gate/rotate`
+  （新口令只显示一次，服务端只存哈希）、`/gate/cert/selfsigned`、
+  `/config/diff` + `/config/reload`（热改子集 + 如实报告"哪些必须重启"）、
+  `PUT /config` 明确拒绝并指路到专用端点。
+- 事件同时挂命中级 payload 与 `targets[]`，并补 `ruleset_version` 同义字段。
+
+### 修复（联调中发现的 7 处前后端契约不一致）
+1. `/session` 未登录返回 200 → 改 **401**（前端按全站约定判断，200 会导致首屏显示"会话已过期"）。
+2. `overload.level` 给字符串 → 同时给**数字**（前端做数值比较，字符串会被判成 null，
+   于是正常状态被显示成"系统处于降级状态 L?"）。
+3. 限速缺秒数字段 → 补 `ban_duration_s` / `ban_window_s`（前端按秒格式化）。
+4. 审计返回 `{changes, auth}` → 补合并后的 `items`（统一 actor/action/at/ok）。
+5. 事件 payload 只在顶层 → 同时挂到 `hits[]` 每条（前端在 hits 非空时只渲染命中级 payload，
+   否则详情页一片"(无)"）。
+6. 事件缺 `ruleset_version` → 补同义字段。
+7. `/status` 缺就绪信息 → 复用 `server.ReadyMap()`，与 `/readyz` **同一份事实**。
+另外修掉"门槛关闭时仍强制要求门槛口令"导致控制台起不来（`gate.enabled: false` 时的启动失败）。
+
+### 浏览器实测（真实 Chrome，八个页面）
+0 个"后端未定义"、0 个错误态；概览的 Profile/内存/预算/GOMAXPROCS/运行时长/上游健康全部有值；
+事件详情用**代码模式**展开 —— payload `<script>alert(1)</script>` 在 `<pre><code>` 里是
+**纯文本节点**（elementChildren=0、无 script/img/iframe），即"看得见、执行不了"。
+
+### 仍未实现（前端已做明确空态）
+`/totp/enroll`、`/notify` 与 `/notify/test`、`/gate/path/rotate`。

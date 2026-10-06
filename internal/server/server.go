@@ -252,10 +252,29 @@ type ReadyInfo struct {
 	Log *audit.Stats `json:"log,omitempty"`
 }
 
-func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
-	ok, detail := s.probe.check(r.Context())
+// buildReadyInfo 组装就绪信息。
+//
+// 单独抽出来是为了让数据面的 /readyz 与控制台的 /status 用同一份事实。
+// ReadyMap 把就绪信息以 map 形式给出。
+//
+// 控制台的 /status 与数据面的 /readyz 必须来自**同一份事实** ——
+// 两边各算一遍迟早会出现"控制台说 A、readyz 说 B"这种谁也说不清的局面。
+func (s *Server) ReadyMap() map[string]any {
+	ok, detail := s.probe.check(context.Background())
+	info := s.buildReadyInfo(ok, detail)
+	b, err := json.Marshal(info)
+	if err != nil {
+		return map[string]any{}
+	}
+	var out map[string]any
+	if err := json.Unmarshal(b, &out); err != nil {
+		return map[string]any{}
+	}
+	return out
+}
 
-	info := ReadyInfo{
+func (s *Server) buildReadyInfo(ok bool, detail string) ReadyInfo {
+	return ReadyInfo{
 		Status:          "ok",
 		Version:         s.o.Version,
 		Profile:         string(s.o.ProfileName),
@@ -276,6 +295,12 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		Ruleset:         s.o.Ruleset,
 		UptimeSeconds:   round2(time.Since(s.startedAt).Seconds()),
 	}
+}
+
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	ok, detail := s.probe.check(r.Context())
+
+	info := s.buildReadyInfo(ok, detail)
 
 	healthy := ok && s.ready.Load()
 	if !healthy {

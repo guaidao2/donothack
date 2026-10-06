@@ -463,8 +463,24 @@ func (p *Pipeline) record(t *tx.Transaction, dec engine.Decision, ipRes realip.R
 	for i, ev := range dec.Events {
 		hit := eventstore.HitRef{
 			RuleID: ev.RuleID, Category: ev.Category, Severity: ev.Severity.String(),
-			Target: ev.Target, Detail: ev.Detail, Score: ev.Score,
+			Target: ev.Target, Operator: ev.Operator, Detail: ev.Detail, Score: ev.Score,
+			Phase: ev.Phase.String(), MatchedLen: ev.MatchedLen,
 		}
+		// 命中级的 payload：控制台详情页的"命中链路"只渲染这一层。
+		if len(ev.PayloadBefore) > 0 {
+			hit.Before = string(ev.PayloadBefore)
+		}
+		if len(ev.PayloadAfter) > 0 {
+			hit.After = string(ev.PayloadAfter)
+		}
+		hit.Targets = []eventstore.HitTarget{{
+			Name:     ev.Target,
+			Operator: ev.Operator,
+			Matched:  true,
+			Detail:   ev.Detail,
+			Before:   hit.Before,
+			After:    hit.After,
+		}}
 		e.Hits = append(e.Hits, hit)
 		if best < 0 || ev.Score > dec.Events[best].Score {
 			best = i

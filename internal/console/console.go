@@ -121,22 +121,38 @@ func New(o Options) (*Server, string, error) {
 	// 门槛凭据是**另一套**（可以单独轮换、可以交给运维同事）。
 	// 首次运行时若没配门槛凭据，就用同一个初始密码再哈希一次 ——
 	// 让运维只抄一个口令进门；之后可以各自轮换。
+	//
+	// 注意：**只有门槛真的启用时才需要它**。门槛关掉（gate.enabled: false
+	// 或 mode: none）却还强制要求门槛口令，会让"只想跑一个不带门槛的本地控制台"
+	// 直接起不来 —— 这是个实际踩到的启动失败。
 	gateHash := o.Config.Admin.Gate.PasswordHash
-	if strings.TrimSpace(gateHash) == "" {
-		if initial != "" {
+	if gateNeeded(o.Config) {
+		if strings.TrimSpace(gateHash) == "" {
+			if initial == "" {
+				return nil, "", fmt.Errorf("启用门槛时必须配置 admin.gate.password_hash" +
+					"（或留空 admin.password_hash 让程序生成初始口令）")
+			}
 			h, err := hashPassword(initial)
 			if err != nil {
 				return nil, "", err
 			}
 			gateHash = h
-		} else {
-			return nil, "", fmt.Errorf("启用门槛时必须配置 admin.gate.password_hash（或留空 admin.password_hash 让程序生成初始口令）")
 		}
 	}
 	s.gate = &gateState{passwordHash: gateHash}
 
 	s.routes()
 	return s, initial, nil
+}
+
+// gateNeeded 判断门槛是否真的启用。
+//
+// enabled 与 mode 都要看：mode=none 表示明确不要门槛（即便 enabled 为真）。
+func gateNeeded(cfg *config.Config) bool {
+	if !cfg.Admin.Gate.Enabled {
+		return false
+	}
+	return cfg.Admin.Gate.Mode != "none"
 }
 
 // Mount 返回控制台的挂载前缀。
@@ -183,6 +199,7 @@ func (s *Server) routes() {
 	h("/api/v1/events", s.handleEvents)
 	h("/api/v1/events/", s.handleEventByID) // /events/:id 与 /events/:id/raw
 	h("/api/v1/events/stream", s.handleEventsStream)
+	h("/api/v1/events/export", s.handleEventsExport)
 
 	// 规则
 	h("/api/v1/rules", s.handleRules)
@@ -191,6 +208,7 @@ func (s *Server) routes() {
 	h("/api/v1/rules/test", s.handleRulesTest)
 	h("/api/v1/rulesets/reload", s.handleRulesReload)
 	h("/api/v1/rulesets/preview", s.handleRulesPreview)
+	h("/api/v1/rulesets", s.handleRuleSets)
 
 	// 拦截页（本次新增：内容可在控制台里改）
 	h("/api/v1/block-page", s.handleBlockPage)
@@ -200,6 +218,11 @@ func (s *Server) routes() {
 	h("/api/v1/ratelimit", s.handleRateLimit)
 	h("/api/v1/bans", s.handleBans)
 	h("/api/v1/bans/", s.handleBanByIP)
+
+	// 门槛
+	h("/api/v1/gate", s.handleGate)
+	h("/api/v1/gate/rotate", s.handleGateRotate)
+	h("/api/v1/gate/cert/selfsigned", s.handleGateCertSelfSigned)
 
 	// 例外与 IP 名单
 	h("/api/v1/exceptions", s.handleExceptions)
@@ -213,6 +236,8 @@ func (s *Server) routes() {
 
 	// 配置与审计
 	h("/api/v1/config", s.handleConfig)
+	h("/api/v1/config/diff", s.handleConfigDiff)
+	h("/api/v1/config/reload", s.handleConfigReload)
 	h("/api/v1/console-audit", s.handleConsoleAudit)
 
 	// 静态资源与 SPA 兜底
@@ -254,7 +279,7 @@ func (s *Server) gateMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
-		if s.o.Config.Admin.Gate.Enabled && s.o.Config.Admin.Gate.Mode != "none" && !hasToken {
+		if gateNeeded(s.o.Config) && !hasToken {
 			if !basicAuthOK(r, s.o.Config.Admin.Gate.Username, s.gate.passwordHash) {
 				s.gateFails.Add(1)
 				// 门槛失败计入封禁（与登录失败合并）

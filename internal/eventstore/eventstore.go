@@ -41,7 +41,10 @@ type Event struct {
 	Verdict  string    `json:"verdict"`
 	Score    int       `json:"score"`
 	Ruleset  string    `json:"ruleset"`
-	Mode     string    `json:"mode"`
+	// RulesetVersion 是 ruleset 的同义字段：控制台读的是这个名字，
+	// 只给一个让运维对着 "—" 猜是没数据还是坏了。
+	RulesetVersion string `json:"ruleset_version,omitempty"`
+	Mode           string `json:"mode"`
 
 	// 命中信息（可能有多条规则，这里存"主导"的那一条 + 全部命中 ID 列表）
 	RuleID     string   `json:"rule_id,omitempty"`
@@ -68,13 +71,34 @@ type Event struct {
 }
 
 // HitRef 是事件里的一条命中摘要。
+//
+// **payload 必须挂在命中级**（而不是只在事件顶层）：
+// 控制台在 hits[] 非空时只渲染命中链路里每条的 payload，
+// 只给事件级字段会让详情页一片 "(无)"。
 type HitRef struct {
-	RuleID   string `json:"rule_id"`
-	Category string `json:"category"`
-	Severity string `json:"severity"`
-	Target   string `json:"target"`
-	Detail   string `json:"detail"`
-	Score    int    `json:"score"`
+	RuleID     string `json:"rule_id"`
+	Category   string `json:"category"`
+	Severity   string `json:"severity"`
+	Target     string `json:"target"`
+	Operator   string `json:"operator,omitempty"`
+	Detail     string `json:"detail"`
+	Score      int    `json:"score"`
+	Phase      string `json:"phase,omitempty"`
+	MatchedLen int    `json:"matched_len,omitempty"`
+	Before     string `json:"before,omitempty"`
+	After      string `json:"after,omitempty"`
+	// Targets 是控制台渲染目标表时用的形状（它优先读 targets[]）。
+	Targets []HitTarget `json:"targets,omitempty"`
+}
+
+// HitTarget 是命中链路里的一个"目标 → 值"明细。
+type HitTarget struct {
+	Name     string `json:"name"`
+	Operator string `json:"operator,omitempty"`
+	Matched  bool   `json:"matched"`
+	Detail   string `json:"detail,omitempty"`
+	Before   string `json:"before,omitempty"`
+	After    string `json:"after,omitempty"`
 }
 
 // Options 是存储构造参数。
@@ -170,6 +194,9 @@ func (s *Store) Add(e Event) {
 	}
 	if e.Ts.IsZero() {
 		e.Ts = s.o.Now()
+	}
+	if e.RulesetVersion == "" {
+		e.RulesetVersion = e.Ruleset
 	}
 	if e.PayloadBefore != "" {
 		e.PayloadBefore, e.PayloadTruncated = clipPrintable(e.PayloadBefore, s.o.PayloadLimit)
@@ -587,3 +614,59 @@ func decodeRune(s string) (rune, int) {
 		return 0, 0
 	}
 }
+
+// TopPaths 返回命中最多的路径（控制台的"热点接口"排行）。
+func (s *Store) TopPaths(limit int) []Count {
+	return s.topBy(limit, func(e Event) string {
+		if e.Path == "" {
+			return ""
+		}
+		return e.Path
+	}, isBlocking)
+}
+
+// TopRules 返回命中最多的规则（控制台的"哪条规则最忙"排行）。
+//
+// 只统计被处置的事件：放行的事件数量大，会把排行冲得没有意义。
+func (s *Store) TopRules(limit int) []Count {
+	return s.topBy(limit, func(e Event) string { return e.RuleID }, isBlocking)
+}
+
+func (s *Store) topBy(limit int, key func(Event) string, filter func(string) bool) []Count {
+	if limit <= 0 {
+		limit = 10
+	}
+	s.mu.RLock()
+	counts := map[string]uint64{}
+	for i := 0; i < s.size; i++ {
+		idx := (s.head - 1 - i + len(s.ring)) % len(s.ring)
+		e := s.ring[idx]
+		k := key(e)
+		if k == "" {
+			continue
+		}
+		if filter != nil && !filter(e.Verdict) {
+			continue
+		}
+		counts[k]++
+	}
+	s.mu.RUnlock()
+
+	out := make([]Count, 0, len(counts))
+	for k, v := range counts {
+		out = append(out, Count{Key: k, N: v})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].N != out[j].N {
+			return out[i].N > out[j].N
+		}
+		return out[i].Key < out[j].Key
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+// CategoriesSorted 返回按数量倒序的类目分布（供控制台直接画图）。
+func (s *Store) CategoriesSorted() []Count { return s.Categories() }

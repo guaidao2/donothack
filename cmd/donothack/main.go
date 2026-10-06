@@ -329,6 +329,19 @@ func run(cfgPath string, checkOnly, printBudget, noRules bool) error {
 		})
 	}
 
+	srv := server.New(server.Options{
+		Config:        cfg,
+		Profile:       p,
+		ProfileName:   cfg.ResolvedProfile,
+		ProfileSource: cfg.ProfileSource,
+		Budget:        budget,
+		Detection:     det,
+		MemLimit:      memLimit,
+		Logger:        logger,
+		Next:          dataplane,
+		Version:       version.Version,
+		Ruleset:       rulesetSummary(ruleSet),
+	})
 	// ---- 控制台（独立端口、独立 mux、不进检测引擎）----
 	if cfg.Admin.Enabled {
 		if ctl == nil {
@@ -342,6 +355,9 @@ func run(cfgPath string, checkOnly, printBudget, noRules bool) error {
 			Resolver: resolver,
 			Logger:   logger,
 			Version:  version.Version,
+			// 控制台的 /status 与数据面的 /readyz 共用同一份就绪事实，
+			// 避免两边各算一遍后出现"控制台说 A、readyz 说 B"。
+			ReadyInfo: srv.ReadyMap,
 			EventSummary: func() map[string]any {
 				out := map[string]any{}
 				if pl != nil {
@@ -355,6 +371,10 @@ func run(cfgPath string, checkOnly, printBudget, noRules bool) error {
 				if degrader != nil {
 					ds := degrader.Stats()
 					out["degrade_level"] = ds.Level
+					// 数字形式也要给：控制台把它当数值比较（0=正常），
+					// 只给 "L0-normal" 这种字符串会被当成 null，
+					// 于是正常状态被误显示成"系统处于降级状态 L?"。
+					out["degrade_level_num"] = ds.LevelNum
 					out["degrade_reason"] = ds.Reason
 					out["degrade_reject"] = ds.ShouldReject
 				}
@@ -380,20 +400,6 @@ func run(cfgPath string, checkOnly, printBudget, noRules bool) error {
 				"login_url", cs.URL())
 		}
 	}
-
-	srv := server.New(server.Options{
-		Config:        cfg,
-		Profile:       p,
-		ProfileName:   cfg.ResolvedProfile,
-		ProfileSource: cfg.ProfileSource,
-		Budget:        budget,
-		Detection:     det,
-		MemLimit:      memLimit,
-		Logger:        logger,
-		Next:          dataplane,
-		Version:       version.Version,
-		Ruleset:       rulesetSummary(ruleSet),
-	})
 
 	return srv.Serve(ctx)
 }
