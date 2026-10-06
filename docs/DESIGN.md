@@ -18,6 +18,7 @@
 | --- | --- |
 | 检测准 | **核心 KPI。** 覆盖 SQLi / XSS / RCE / LFI / webshell / 扫描器等常见 payload，同时误报率可控。范围只做请求侧，见非目标。 |
 | 生产可用 | 不是演示品。零停机热加载、优雅停机、健康探针、可观测性、误报可治理，全部是必备项。 |
+| 可运维 | **必须有 Web 控制台**（对标雷池）：浏览器里看攻击、查事件、启停规则、加白名单、调限速、改配置、看操作审计。设计与安全要求见 `docs/CONSOLE.md`。 |
 | 单二进制 | 纯 Go，无 CGO，`CGO_ENABLED=0` 交叉编译，不依赖 nginx / Apache / Lua / PCRE 动态库。 |
 | **低配 VPS 能跑** | **首要约束。** 目标机型 2 vCPU / 2 GiB（`medium` 档），最低支持 1 vCPU / 512 MiB（`small` 档）。预算见 `docs/PERFORMANCE.md`。 |
 | 低开销 | 无命中路径附加延迟 P99 < 0.5ms，吞吐相对直连下降 < 10%。热路径零分配，见 `docs/PERFORMANCE.md`。 |
@@ -229,6 +230,7 @@ cmd/donothackctl/           管理客户端（reload、规则自测、状态查�
 
 internal/config/       配置结构体、YAML 加载、校验、默认值、热加载协调
 internal/tx/           Transaction、Collections、Event、Verdict、Score 定义
+internal/control/      Snapshot / Apply / Preview / Subscribe —— 控制面唯一写入口
 internal/parser/       请求 → Collections（路径规范化、解码链、解压、JSON/XML/multipart）
 internal/transform/    变换函数注册表与实现
 internal/operator/     算子注册表与实现（regex、pm、detectSQLi、detectXSS、entropy、luhn、ipMatch…）
@@ -240,9 +242,11 @@ internal/proxy/        反向代理、WebSocket 隧道、响应流式透传（�
 internal/realip/       可信代理链与真实 IP 还原
 internal/audit/        结构化审计日志、文件轮转、异步写入
 internal/metrics/     Prometheus 指标
-internal/admin/       管理 API（reload、规则自测、统计查询）
+internal/admin/        控制面 REST API（/api/v1）、认证、会话、操作审计
+internal/console/      Web 控制台静态资源服务（go:embed、CSP、缓存、gzip）
 internal/alert/        告警钩子（webhook / 日志标记）
 internal/version/      版本、构建信息（ldflags 注入）
+web/                   控制台前端源码（原生 ES module SPA，无构建链）
 rules/                 内置规则集（YAML）
 testdata/              语料（正/负样本）
 docs/                  设计文档、规则文档、压测报告
@@ -253,18 +257,21 @@ scripts/               压测、语料回归、构建脚本
 
 ```
 cmd/donothack
-  └─ config
-  └─ proxy ─┬─ engine ─┬─ rules ─┬─ parser
-            │          │         ├─ transform
-            │          │         └─ operator
-            │          ├─ actions ─ ratelimit
-            │          └─ tx
-            ├─ realip
-            └─ audit / metrics / alert
-  └─ admin ──── rules / engine / metrics
+  ├─ config
+  ├─ control ──── config / rules / iplist / audit
+  ├─ proxy ─┬─ engine ─┬─ rules ─┬─ parser
+  │         │          │         ├─ transform
+  │         │          │         └─ operator
+  │         │          ├─ actions ─ ratelimit
+  │         │          └─ tx
+  │         ├─ realip
+  │         └─ audit / metrics / alert
+  └─ admin ─┬─ control            （唯一写入口；API 不直接碰 config/rules）
+            ├─ console ── web/    （embed 静态资源）
+            └─ metrics / audit
 ```
 
-`tx` 是最底层，不依赖任何其他内部包。`parser`、`transform`、`operator` 互不依赖。**禁止循环依赖**，用 `go vet` + CI 卡住。
+`tx` 是最底层，不依赖任何其他内部包。`parser`、`transform`、`operator` 互不依赖。**`admin` 不允许直接改 `config` 或 `rules`，必须经 `control.Apply`** —— 这是控制面与数据面分离在依赖图上的体现。**禁止循环依赖**，用 `go vet` + CI 卡住。
 
 ---
 
@@ -612,24 +619,28 @@ type RealIPConfig struct {
 
 ### 13.2 热加载
 
+热加载是 `control.Apply` 的一个 `Mutation` 实现（见 `docs/CONSOLE.md` §2）。触发方式：SIGHUP、`POST /api/v1/config/reload`、或控制台点"保存"。**三条路走的是同一段代码**，不允许各写一套。
+
 ```go
-// 监听 SIGHUP 或 POST /admin/reload
-func (m *Manager) Reload(path string) error {
-	next, err := load(path)          // 1. 读 + 解析 + 校验
-	if err != nil { return err }     //    失败 → 保留旧配置，报错返回
-	rs, err := rules.Compile(next)   // 2. 编译规则
-	if err != nil { return err }
-	if err := selfTest(rs); err != nil { return err }  // 3. 内置正负语料自测
-	// 4. 全部通过才原子切换
-	applyConfig(next)
-	rules.Swap(rs)
-	return nil
+// 监听 SIGHUP 或 POST /api/v1/config/reload；控制台保存也走这里
+func (m *Manager) Reload(ctx context.Context, path string) (*control.Snapshot, error) {
+	return m.ctrl.Apply(ctx, configMutation{path: path})
 }
+
+// Apply 内部流程（control 包，串行执行）
+//  1. 读文件 + 解析 + 校验
+//  2. 编译规则（规则集 + 预筛自动机）
+//  3. 跑内置正负语料自测
+//  4. 构造新 Snapshot
+//  5. atomic.Pointer 原子替换
+// 任何一步失败 → 不替换，旧快照继续服务，错误原样返回给调用方（控制台会回显）
 ```
 
 **自测**：内置语料里每条必须拦的样本必须被拦、每条不能拦的样本必须不被拦。任何一条不满足则拒绝加载并告警。这防止手滑的宽泛正则直接把线上打挂。
 
-不可热加载的配置（`listen` 地址、TLS 私钥路径）改动后标记 `pending_restart`，通过管理 API 暴露，日志提醒。
+**串行**：`Apply` 用单写者锁保护，两个运维同时保存不会互相覆盖 —— 后来者会看到前者的结果或拿到明确的"版本已变化"错误。
+
+不可热加载的配置（`listen` 地址、控制台监听地址、TLS 私钥路径）改动后标记 `pending_restart`，通过 `/api/v1/config` 暴露，控制台与日志都提醒。
 
 ---
 
@@ -706,9 +717,11 @@ donothack_go_goroutines / donothack_go_memstats_*              runtime
 | `/healthz` | liveness | 进程活着就 200，不检查依赖 |
 | `/readyz` | readiness | 配置已加载、规则集非空、上游 DNS 可解析 → 200；否则 503 |
 | `/metrics` | 指标 | 可配绑定地址与是否暴露 |
-| `/admin/*` | 管理 API | 默认只监听 `127.0.0.1`，需 token |
+| `/api/v1/*` | 控制面 API | 独立监听端口，默认 `127.0.0.1:9443`，认证见 `docs/CONSOLE.md` §3 |
 
-管理 API（P4）：`POST /admin/reload`、`GET /admin/rules`、`POST /admin/rule-test`（提交一条规则+样本，返回是否命中，用于调规则）、`GET /admin/events`。
+**控制面（P4 起）**：完整 REST API 见 `docs/CONSOLE.md` §5，关键端点如 `POST /api/v1/rulesets/reload`、`GET /api/v1/rules`、`POST /api/v1/rules/test`（提交原始请求，返回完整命中链路，用于调规则）、`GET /api/v1/events`、`GET /api/v1/events/stream`（SSE）、`GET/PUT /api/v1/config`（带 `Preview`）。
+
+控制面与数据面严格分离：**所有写操作只能走 `control.Apply`**（校验 → 内置语料自测 → 原子替换 → 失败回滚），数据面只读不可变快照。契约见 `docs/CONSOLE.md` §2。
 
 ### 14.4 告警钩子
 
@@ -842,8 +855,9 @@ testdata/corpus/
 | P1 | 路径规范化与解码链单测全过；`BenchmarkParseQuery` 达到 0 allocs/op；fuzz 60s 无 crash；畸形请求（超长 URI、非法 %转义、截断 multipart、深层 JSON、解压炸弹）全部 fail-open 且审计有记录；各类上限超限行为符合 `PERFORMANCE.md` §5.2 表 |
 | P2 | DSL 能加载并编译；regex / pm / contains / detectSQLi / detectXSS 算子可用；**变换链去重与共享 AC 预筛生效**（启动日志打印不同链数量与自动机规模）；`BenchmarkEngine_NoMatch` 达到 0 allocs/op；阶段 1/2 生效；语料回归跑通；`donothack test -r` 可用 |
 | P3 | 评分与阈值生效；detect/block 模式可热切；限速与临时封禁生效且状态表容量上限可验证（伪造 IP 喷洒不涨内存）；白名单不误伤；`medium` profile 压测达标（P99 < 0.5ms 纯转发、吞吐降幅 < 10%、满负载 RSS < 120 MiB）且 `small` 保底线达标；L1–L4 降级可用且状态可见 |
-| P4 | 零停机 reload（含失败回滚与峰值内存校验）验证通过；指标齐全（含池命中率、降级级别）；审计轮转正常；管理 API 鉴权生效；TLS 开关与证书热加载可用（默认关）；明文 HTTP 与 XFF 还原链路验证通过 |
-| P5 | 内置规则集覆盖 SQLi/XSS/RCE/LFI/RFI/webshell/扫描器/协议/上传，每条有正负样本；误报治理报告产出；真机 2 核 2 GiB 基线报告与运维文档齐 |
+| P4 | `control.Apply` 契约生效（失败回滚、错误可诊断）；零停机 reload（含峰值内存校验）验证通过；指标齐全（含池命中率、降级级别）；审计轮转正常；`/api/v1` 鉴权与登录锁定生效；缺自定义头/伪造 Origin 的写操作被拒；操作审计落盘；TLS 开关与证书热加载可用（默认关）；明文 HTTP 与 XFF 还原链路验证通过 |
+| P5 | 控制台八个页面可用；`small` 档控制台额外内存 ≤ 8 MiB；事件查询 3 天范围 P99 < 300ms；含 `<script>` 的 payload 在列表页不回显原文；CSP 无 `unsafe-inline`；CLI 与控制台共用同一套 API |
+| P6 | 内置规则集覆盖 SQLi/XSS/RCE/LFI/RFI/webshell/扫描器/协议/上传，每条有正负样本；误报治理报告产出；真机 2 核 2 GiB 基线报告与运维文档齐 |
 
 ### 17.4 从检测切拦截的判据（不是感觉，是数据）
 
@@ -903,17 +917,29 @@ testdata/corpus/
 
 交付判据：`medium` profile 压测达标、`small` 保底线达标、误报不炸、伪造源 IP 喷洒不打爆内存。
 
-### P4 运维与可靠性
+### P4 运维后端与可靠性（控制台的前提）
 
-产出：`audit`（JSON Lines + 轮转 + ring buffer + 有界队列丢弃计数）、`metrics`（含池命中率、降级级别、内存预算）、`admin`（reload / rules / rule-test / events / pprof 默认关）、`alert`、零停机 reload 与失败回滚、TLS 与证书热加载（默认关）、h2 随 TLS 可选、Redis 限速后端（可选）。
+产出：`control`（`Snapshot` / `Apply` / `Preview` / `Subscribe`，单写者串行、失败回滚）、`audit`（JSON Lines + 轮转 + ring buffer + 分钟聚合桶 + 有界队列丢弃计数）、`metrics`（含池命中率、降级级别、内存预算）、`admin`（完整 `/api/v1`、认证 basic/session/both、失败锁定、CSRF、操作审计、pprof 默认关）、`alert`、零停机 reload 与失败回滚、TLS 与证书热加载（默认关）、h2 随 TLS 可选、Redis 限速后端（可选）。
 
-交付判据：reload 零失败请求且峰值内存符合预算表，指标齐全，探针正确，降级状态三处可见，明文 HTTP + XFF 还原链路验证通过。
+交付判据：reload 零失败请求且峰值内存符合预算表；`Apply` 失败时线上状态不变且错误可诊断；缺自定义头或伪造 Origin 的写操作被拒；5 次登录失败后锁定生效；指标齐全，探针正确，降级状态三处可见，明文 HTTP + XFF 还原链路验证通过。
 
-### P5 规则集与投产
+### P5 Web 控制台
 
-产出：全类目内置规则集（每条带正负样本）、误报治理报告、SecRules 兼容层（视情况）、运维手册（含 systemd / Docker / 低配调优）、**真机 2 核 2 GiB 性能基线与容量报告（附 1 核 512 MiB 保底线数据）**、发布流程。
+产出：`web/` 原生 ES module SPA（概览 / 事件 / 规则 / 规则测试台 / 例外白名单 / CC 限速 / 系统设置 / 操作审计 八个页面）、`internal/console` 静态资源服务（embed、CSP、缓存、gzip）、`cmd/donothackctl` 走同一套 API。
+
+交付判据：`small` 档下页面可用且控制台额外内存 ≤ 8 MiB；事件查询 3 天范围 P99 < 300ms；**用一条含 `<script>` 的 payload 验证列表页不回显原文**；CSP 无 `unsafe-inline`；公网明文绑定必须显式 `allow_insecure` 才能启动。详见 `docs/CONSOLE.md` §10。
+
+### P6 规则集与投产
+
+产出：全类目内置规则集（每条带正负样本）、误报治理报告、SecRules 兼容层（视情况）、运维手册（含 systemd / Docker / 低配调优 / 控制台使用）、**真机 2 核 2 GiB 性能基线与容量报告（附 1 核 512 MiB 保底线数据）**、发布流程。
 
 交付判据：检测模式 7 天数据支撑，逐类目切拦截；真机基线与 `PERFORMANCE.md` §2 目标对齐（不达标就改实现或改目标，不允许留一张对不上的表）。
+
+### P7 多站点（后置）
+
+产出：数据面按 Host 路由到不同上游与规则集、站点级证书与开关、控制台站点管理页与站点切换器。`Snapshot` 从单站点扩为 `[]Site`。
+
+交付判据：一个控制台可管多个站点，站点间规则与上游互不影响。
 
 ---
 
@@ -938,10 +964,13 @@ testdata/corpus/
 4. **多上游与服务发现**：P5 之后是否需要。
 5. **Redis 是否必须**：单副本部署时不需要。若确定多副本，P3 就要把 `Store` 接上，不要拖到上线前。
 6. **TLS 证书来源**：明文 HTTP 是常见场景，TLS 默认关。需要时先做文件热加载，ACME 自动签发后置。
-7. **是否要 GUI**：不做。管理走 API + 命令行。
+7. **Web 控制台**：**要做**（P5），设计与安全要求见 `docs/CONSOLE.md`。此前"不做 GUI，管理走 API + 命令行"的判断作废 —— 生产运维需要浏览器里就能看攻击、改规则、加白名单。控制台与数据面同进程同二进制（`go:embed`），前端是原生 ES module SPA，无 Node 构建链。多站点（雷池式）后置为 P7。
 8. **响应侧检测是否永远不做**：本轮按需求收窄砍掉。若将来要加，代价见 §12，需要重新算性能预算。
 9. **限速/封禁是否保留**：需求只提了"识别请求里的攻击 payload"，限速属于附加能力。当前设计保留（成本低、不涉及响应缓冲），默认开。若不需要，可整模块关掉。
 10. **目标 VPS**：已定 2 核 2 GiB（`medium` 为目标档），1 核 512 MiB 为保底线。**仍需一台真机跑基线**，否则 §15.3 的数字只能标注"未经实测"。
+11. **控制台认证默认模式**（`basic` 还是 `session`）与是否需要多用户/角色 —— 见 `docs/CONSOLE.md` §11。
+12. **多站点（P7）是否真要做**：当前单站点，数据结构按 `[]Site` 预留。若确定要，P4 的 `Snapshot` 结构就要一次到位，别等 P7 再动。
+13. **控制台是否要暴露 payload 原文查看入口**：默认关。开启要接受"控制台自身成为 XSS 载体"的风险与合规问题。
 
 ---
 
@@ -1057,8 +1086,25 @@ metrics:
 
 admin:
   enabled: true
-  addr: "127.0.0.1:9091"
-  token: ""                # 必填，空则禁用管理 API
+  addr: "127.0.0.1:9443"    # 控制台 + /api/v1 监听地址
+  auth_mode: basic          # basic | session | both
+  username: "admin"
+  password_hash: ""         # PBKDF2-HMAC-SHA256 600k 迭代；为空则控制台不启动并打印生成命令
+  api_token: ""             # CLI 与脚本用；可单独生成与轮换
+  totp_enabled: false
+  allow_ips: []             # 可选 IP 白名单
+  allow_insecure: false     # 绑非本地地址且未启 TLS 时必须显式设 true 才启动
+  session_idle_timeout: 30m
+  max_login_fails: 5        # 单 IP 失败上限
+  lockout: 15m
+  pprof: false              # 默认关，只在 127.0.0.1 可用
+  events:
+    retention_days: 7
+    retention_bytes: 536870912
+    max_query_range: 24h    # 控制台单次查询最大时间范围
+    max_rows: 200
+    query_timeout: 3s
+    sqlite: false           # 纯 Go SQLite 富查询，medium/small 默认关
 
 alert:
   enabled: false
@@ -1078,6 +1124,9 @@ alert:
 - [x] 目标机型：2 vCPU / 2 GiB（`medium` 为目标档），1 vCPU / 512 MiB 为保底线
 - [x] 检测范围：**只做请求侧**（请求头、请求体、参数），响应侧不做
 - [x] TLS 默认关（站点可能跑明文 HTTP）
+- [x] **必须有 Web 控制台**（对标雷池），单站点先行、多站点后置 P7
+- [x] 控制台前端用原生 ES module SPA，不引 Node 构建链
+- [x] 控制台可公网访问 —— 因此 TLS、登录失败锁定、写操作自定义头 + Origin 校验为**强制项**
 
 仍待确认：
 
@@ -1091,3 +1140,7 @@ alert:
 - [ ] 是否提供真机（2 核 2 GiB）跑一次基线，否则目标值只能标注"未经实测"
 - [ ] §18 阶段划分与顺序是否认可（P0 骨架是否过轻）
 - [ ] §20 未决问题逐条定调
+- [ ] 控制台认证默认用 `basic` 还是 `session`（见 `docs/CONSOLE.md` §11）
+- [ ] 是否需要多用户与角色（管理员 / 只读运维）
+- [ ] 事件保留默认 7 天 / 512 MiB 是否合适
+- [ ] 是否开放「查看 payload 原文」入口（默认关；开启需接受 XSS 面与合规风险）
