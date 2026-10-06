@@ -19,27 +19,42 @@
 
 ## 文档
 
-- [架构设计](docs/DESIGN.md) —— 总体架构、模块划分、关键接口、数据结构、性能目标、测试策略、阶段划分
+- [架构设计](docs/DESIGN.md) —— 总体架构、模块划分、关键接口、数据结构、阶段划分与验收标准
+- [性能预算与低配部署](docs/PERFORMANCE.md) —— **硬约束文档**：profile 分级、每请求 CPU/内存预算、热路径零分配、变换链去重与共享预筛、GC 与内存控制、构建参数、降级策略、性能门禁
 - [规则 DSL 规格](docs/RULES.md) —— 规则文件格式、变量集合、变换、算子、例外机制、离线测试
 - [变更日志](CHANGELOG.md)
+
+## 首要约束：低配 VPS 也要能跑
+
+最低支持 **1 vCPU / 512 MiB**。这条约束决定了实现方式：
+
+- **热路径零分配**。1 核上 GC 是主要 CPU 消耗，`BenchmarkEngine_NoMatch` 硬门禁 0 allocs/op，端到端 wafd 自身新增分配 ≤ 2 allocs/req。
+- **变换链去重 + 共享 Aho-Corasick 预筛**。300 条规则归一化后通常只有 5~10 条不同变换链，每链每值只算一次、只扫一次，命中候选才跑昂贵算子。
+- **逐项有界**。请求体、响应体、连接数、参数个数、限速表容量全部有上限。**无界即漏洞** —— 伪造源 IP 喷洒就能把 512 MiB 打爆。
+- **分级 profile**。`small` / `medium` / `large` 按 cgroup 自动探测，档位决定检查上限、连接上限、规则集上限、`GOGC` 与 `GOMEMLIMIT`。
+- **有界降级**。过载时按 L1–L4 分级降级，状态必须进日志、指标与 `/readyz`；`block` 模式禁止静默降级（宁可 503 也不悄悄放行攻击）。
+- **构建钉死 `GOAMD64=v1`**。低配 VPS 的 CPU 常常不支持 AVX2，`v3` 会直接 `illegal instruction` 崩掉。
 
 ## 设计要点（速览）
 
 - **变量集合抽象**：所有输入来源（query / form / JSON / XML / multipart / cookie / header）统一拆平成扁平命名空间，规则只对着命名空间匹配，各类编码绕走在解析层被统一消化。
 - **评分制而非硬拦**：按类目累积分，达到阈值才拦，避免"一个单引号封站"。
 - **fail-open**：任何解析或规则异常都放行并留审计，WAF 绝不成为业务单点故障。
-- **字面量预筛**：编译期提取模式里的字面量建 Aho-Corasick 索引，运行期先粗筛再跑昂贵算子，这是性能的主要来源。
+- **变换链去重 + 共享字面量预筛**：全部规则的字面量汇入同一个 Aho-Corasick 自动机，变换链归一化去重（300 条规则通常只有 5~10 条不同链），每链每值只算一次、只扫一次，命中候选才跑昂贵算子。这是低配下性能的主要来源。
 - **零停机热加载**：规则集不可变 + `atomic.Pointer` 原子替换，加载前跑内置正负语料自测，失败自动回滚。
 - **检测模式先行**：默认只记录不拦截，用真实的规则命中数据决定哪条规则够格进拦截档。
 
-## 目标性能
+## 目标性能（`small` profile，1 vCPU / 512 MiB）
 
-本机 4C8G、keep-alive、约 300 条规则：
+以下为**目标值**，须在真机 VPS 上实测确认后才算达成，未经实测不作为承诺。
 
-- 无命中路径附加延迟 P50 < 0.2ms，P99 < 1ms
-- 吞吐相对直连上游下降 < 15%
-- 常驻内存 < 100 MiB，压测 30 分钟无增长
+- 纯转发 GET：附加延迟 P50 < 0.15ms，P99 < 0.5ms
+- 1 KiB body + 全规则评估：P99 < 1.5ms
+- 吞吐 ≥ 3000 rps，相对直连上游下降 < 10%
+- 空载常驻 < 15 MiB，满负载 < 48 MiB，压测 30 分钟 RSS 稳定
 - reload 期间零失败请求
+
+门禁与测量方法见 [PERFORMANCE.md](docs/PERFORMANCE.md) §10。
 
 ## 开发约定
 
@@ -49,8 +64,12 @@ gofmt -l .          # 必须无输出
 go vet ./...
 go test ./...
 
-# 跨平台编译（无 CGO）
-CGO_ENABLED=0 go build -o dist/wafd ./cmd/wafd
+# 性能门禁（分配数、延迟、吞吐、内存），超标非零退出
+pwsh ./scripts/perf-gate.ps1
+
+# 跨平台编译（无 CGO；GOAMD64 必须是 v1，低配 VPS 的 CPU 常不支持 AVX2）
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v1 \
+  go build -trimpath -ldflags="-s -w" -o dist/wafd-linux-amd64 ./cmd/wafd
 ```
 
 Git 工作流见 `docs/DESIGN.md` §19：`main` 只接全绿的提交，功能走 `feat/<阶段>-<模块>` 分支，每个里程碑打 tag，回滚用 `git checkout <tag>`。

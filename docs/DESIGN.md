@@ -18,7 +18,8 @@
 | --- | --- |
 | 生产可用 | 不是演示品。零停机热加载、优雅停机、健康探针、可观测性、误报可治理，全部是必备项。 |
 | 单二进制 | 纯 Go，无 CGO，`CGO_ENABLED=0` 交叉编译，不依赖 nginx / Apache / Lua / PCRE 动态库。 |
-| 低开销 | 无命中路径的附加延迟目标 < 1ms（P99），吞吐相对直连下降 < 15%。 |
+| **低配 VPS 能跑** | **首要约束。** 最低支持 1 vCPU / 512 MiB，空载常驻 < 15 MiB、满负载 < 48 MiB。分级与预算见 `docs/PERFORMANCE.md`。 |
+| 低开销 | 无命中路径附加延迟 P99 < 0.5ms（1 vCPU），吞吐相对直连下降 < 10%。热路径零分配，见 `docs/PERFORMANCE.md`。 |
 | 不成为单点故障 | 任何解析或规则异常都必须 fail-open 放行并留审计，绝不因为 WAF 自身错误导致业务 5xx。 |
 | 可对照回滚 | 规则、配置、代码全部进 git，每次决策可追溯到规则 ID 与规则文件版本。 |
 | 规则可读可写 | 自研 YAML DSL，安全工程师不需要写 Go 就能加规则；预留 ModSecurity SecRules 兼容层。 |
@@ -396,8 +397,8 @@ compressWhitespace → lowercase
 
 ### 8.4 边界处理
 
-- 请求体检查上限 `limits.max_inspect_body`，默认 1 MiB；超限只检查前 N 字节，`BodyTruncated=true` 进审计。**不因为超限就拒绝**（大文件上传是正常业务）。
-- 响应体检查上限 `limits.max_inspect_response`，默认 512 KiB。
+- 请求体检查上限 `limits.max_inspect_body`，按 profile 取值（`small` 128 KiB / `medium` 512 KiB / `large` 1 MiB）；超限只检查前 N 字节，`BodyTruncated=true` 进审计。**不因为超限就拒绝**（大文件上传是正常业务）。
+- 响应体检查上限 `limits.max_inspect_response`，按 profile 取值（`small` 8 KiB / `medium` 256 KiB / `large` 512 KiB）。
 - 二进制响应（`Content-Type` 非文本，或 `Content-Type` 缺失但魔数匹配常见二进制格式）跳过阶段 4，只查响应头。
 - `Content-Length` 与实际不符 → 记分（请求走私迹象）。
 - 同时出现 `Content-Length` 与 `Transfer-Encoding` → 记分（HTTP 请求走私）。
@@ -423,8 +424,8 @@ rules/*.yaml ──load──▶ []Rule ──validate──▶ []Rule ──com
 **编译期做的事**（全部为了运行期少干活）：
 
 1. **目标展开表**：把每个 `VarTarget` 编译成快速查询计划（精确键用 map，正则键用预编译 `*regexp.Regexp`）。
-2. **字面量预筛**：对算子的模式提取最长字面量子串（如 `regex: "(?i)union\s+select"` → `union`），建 Aho-Corasick 机。请求进来先用一次 AC 扫描拿到"可能命中的规则集合"，再只对这几十条跑昂贵算子（如 libinjection、复杂正则）。**这是性能的主要来源。**
-3. **变换链合并**：同一规则内多个 target 共用相同变换前缀时，只算一次。
+2. **变换链去重**：把全部规则的 `transforms` 链归一化去重，得到"不同链集合"（实践中 300 条规则只有 5~10 条）。运行期每个不同链只算一次，其输出各做一次扫描。
+3. **共享字面量预筛**：对算子的模式提取最长字面量子串（如 `regex: "(?i)union\s+select"` → `union`），全部规则汇入**同一个** Aho-Corasick 自动机，终态映射到规则位图。请求进来先用 AC 扫描拿到"可能命中的规则集合"，再只对候选跑昂贵算子（复杂正则、libinjection）。无字面量的规则（`entropy`、`validateByteRange`、`luhn`）归入廉价算子组直接执行。**这是低配下性能的主要来源，详见 `docs/PERFORMANCE.md` §4。**
 4. **短路标记**：标记 `severity: critical` + `action: block` 的规则为 hard-block，命中即终止本阶段剩余规则。
 
 ### 9.2 RuleSet 与热替换
@@ -575,6 +576,7 @@ const (
 ```go
 // internal/config
 type Config struct {
+	Profile   string          `yaml:"profile"`  // small | medium | large | auto（按 cgroup 探测）
 	Listen    ListenConfig    `yaml:"listen"`
 	Upstream  UpstreamConfig  `yaml:"upstream"`
 	TLS       TLSConfig       `yaml:"tls"`
@@ -663,7 +665,7 @@ JSON Lines，一行一事件。字段：
 
 - **默认不记录 payload 原文**，只记目标名、算子、命中长度与指纹描述。防止审计日志本身变成敏感数据泄露点和存储炸弹。
 - 需要取证时用 `log.capture_payload: true`（默认关）或在 `wafdctl replay` 里按 tx_id 从 ring buffer 取。
-- 内存里保留最近 1000 条命中事件的 ring buffer，供 `GET /admin/events` 秒级排查。
+- 内存里保留最近 N 条命中事件的 ring buffer（按 profile：`small` 256 / `medium` 1024 / `large` 4096），供 `GET /admin/events` 秒级排查。**必须定长**，否则就是一条内存增长路径。
 - 日志写入异步 goroutine + 有界 channel，队列满时**丢弃并计数**（宁可丢日志不能阻塞请求），丢弃数进指标。
 - 内置按大小+时间轮转，不依赖 logrotate。
 
@@ -715,27 +717,52 @@ wafd_go_goroutines / wafd_go_memstats_*              runtime
 
 ## 15. 性能设计
 
+**首要约束是"低配 VPS 也要能跑"。** 完整的性能预算、优化手段、构建参数、降级策略与验收门禁见 `docs/PERFORMANCE.md`，本节只列架构层面的手段与结论。
+
+### 15.1 分级 profile
+
+启动时按 cgroup 自动探测内存与 CPU，选 `small` / `medium` / `large` 三档，档位决定检查上限、连接上限、规则集上限、GOGC 与 GOMEMLIMIT。
+
+| 项 | `small`（1 vCPU / 512 MiB） | `medium` | `large` |
+| --- | --- | --- | --- |
+| 请求体 / 响应体检查上限 | 128 KiB / 8 KiB | 512 KiB / 256 KiB | 1 MiB / 512 KiB |
+| 最大并发连接 | 256 | 1024 | 4096 |
+| 规则集上限 | 400 条 | 2000 条 | 10000 条 |
+| HTTP/2 与 h2c | 关 | 开 | 开 |
+| 阶段 4 响应体检测 | 默认关 | 开 | 开 |
+
+### 15.2 架构层面的手段
+
 | 手段 | 说明 |
 | --- | --- |
-| 字面量预筛 | 见 §9.1，把每请求规则评估从 O(全部规则) 降到 O(可能命中) |
-| RE2 | 全部正则走 Go 标准库，线性时间，天然免疫 ReDoS；禁止引入 PCRE |
-| sync.Pool | 解码 buffer、变量值切片、JSON 解析器 |
-| 原子规则集 | `atomic.Pointer` 无锁读取，reload 不影响在途请求 |
-| 惰性解析 | 阶段 1 不解析请求体；只有存在阶段 2 规则时才读 body |
-| 惰性展开 | 同一 target 在一阶段内只展开一次 |
-| 零拷贝 | 只读检测不复制 body，变换才产生新切片 |
-| 有界检查 | body/response 上限截断，避免大文件拖慢 |
-| 连接复用 | 上游 `http.Transport` 调优：`MaxIdleConnsPerHost`、`IdleConnTimeout` |
-| 快速路径 | 无任何请求体且无命中时，直接 `io.Copy` 转发，几乎零开销 |
-| 透传豁免 | WebSocket、`Content-Type` 为二进制、体积超限 → 直接隧道 |
+| **变换链去重 + 单次 AC 扫描** | 低配下最重要的优化。编译期把全部规则的变换链归一化去重（实践中 300 条规则只有 5~10 条不同链），运行期每个不同链只算一次、只扫一次，命中候选再跑昂贵算子。详见 `PERFORMANCE.md` §4。 |
+| **热路径零分配** | 1 核上 GC 是主要 CPU 消耗。`BenchmarkEngine_NoMatch` 硬门禁 0 allocs/op，端到端 wafd 自身新增分配 ≤ 2 allocs/req。禁用 `net/url` 解析、`strings.Split`、热路径 `fmt.Sprintf` 与字符串转换。 |
+| RE2 | 全部正则走 Go 标准库，线性时间，天然免疫 ReDoS；禁止引入 PCRE。 |
+| sync.Pool | 事务对象、解码 buffer、变换输出、审计序列化 buffer、JSON 解析器状态全部池化，归还时 reset 且不持有 body 引用。 |
+| 原子规则集 | `atomic.Pointer` 无锁读取，reload 不影响在途请求。 |
+| 惰性解析 | 阶段 1 不解析请求体；没有阶段 2 规则时 body 完全不解码。 |
+| 惰性展开 | 同一 target 在一阶段内只展开一次。 |
+| 零拷贝 | 只读检测不复制 body；变换才产生新切片。body tee 必须实现并转发 `io.WriterTo`/`io.ReaderFrom`，保住 Linux splice 快路径。 |
+| 有界检查 | 请求体、响应体、连接数、参数个数、值长度、限速表容量、ring buffer 全部有上限，超限截断或淘汰并计数。**无界即漏洞。** |
+| 连接与超时 | `MaxHeaderBytes` 压到 32 KiB，配 `ReadHeaderTimeout` / `ReadTimeout` / `WriteTimeout` / `IdleTimeout`，防慢速攻击吃光内存。 |
+| 连接复用 | 上游 `http.Transport` 按 profile 调优：`MaxIdleConnsPerHost`、`IdleConnTimeout`、`TCP_NODELAY`。 |
+| 快速路径 | 无请求体且无命中时，直接 `io.Copy` 转发，几乎零开销。 |
+| 透传豁免 | WebSocket、二进制 `Content-Type`、体积超限 → 直接隧道，不进检测。 |
+| 有界降级 | 过载时按 L1→L4 分级降级，状态必须体现在日志、指标与 `/readyz`；`block` 模式禁止静默降级。 |
 
-容量目标（本机基准，4C8G，keep-alive）：
+### 15.3 容量目标（`small` profile，1 vCPU / 512 MiB，目标值待真机实测）
 
-- 无规则命中：附加延迟 P50 < 0.2ms，P99 < 1ms
-- 吞吐：相对直连上游下降 < 15%
-- 单实例 ≥ 8000 QPS（简单 GET，规则集约 300 条）
-- 常驻内存 < 100 MiB，压测 30 分钟后 RSS 稳定（无泄漏）
+- 纯转发 GET：附加延迟 P50 < 0.15ms，P99 < 0.5ms
+- 1 KiB body + 全规则评估：P99 < 1.5ms
+- 吞吐 ≥ 3000 rps，相对直连下降 < 10%
+- 空载常驻 < 15 MiB，满负载 < 48 MiB，压测 30 分钟 RSS 稳定
 - reload 期间零请求失败、零连接中断
+
+**这些是目标值，不是实测值。** 真机基线必须在他提供的 1 核 VPS 上跑一次才能确认，方法与脚本见 `PERFORMANCE.md` §10。
+
+### 15.4 明确取舍
+
+低配下放弃：响应体全量检测（`small` 只扫前 8 KiB 文本）、HTTP/2、PCRE 语义、超长值尾部深检测、payload 全量留存、多上游编排、分布式限速。逐条影响见 `PERFORMANCE.md` §9。
 
 ---
 
@@ -754,6 +781,8 @@ wafd_go_goroutines / wafd_go_memstats_*              runtime
 | 管理 API 暴露 | 默认只绑 `127.0.0.1`，token 鉴权，绑定非本地地址时启动告警 |
 | 审计日志泄露 | 默认不记 payload |
 | fail-open / fail-closed | 默认 fail-open（保业务）；`engine.fail_mode: closed` 可切，但仅在明确要求时用 |
+| 内存耗尽（慢速攻击 / 海量连接） | `MaxHeaderBytes` 32 KiB + 读超时 + 并发连接上限 + 限速表容量上限 + 每连接缓冲预算，逐项有界，见 `PERFORMANCE.md` §5.2 |
+| 低配 VPS 上 CPU 被 WAF 吃穿 | profile 分级 + 有界降级；`block` 模式禁止静默降级，过载时返回 503 而非放行，见 `PERFORMANCE.md` §8 |
 | 自身版本泄露 | `Server` 头默认不发或统一伪造成固定值 |
 
 ---
@@ -790,10 +819,10 @@ testdata/corpus/
 
 | 阶段 | 验收标准 |
 | --- | --- |
-| P0 | `wafd -c config.yaml` 起监听；curl 经其访问假上游返回一致内容；结构化访问日志；`/healthz` `/readyz` 正常；SIGTERM 优雅停机不丢在途请求；`go vet ./...`、`go test ./...`、`gofmt -l` 全绿 |
-| P1 | 路径规范化与解码链单测全过；fuzz 60s 无 crash；畸形请求（超长 URI、非法 %转义、截断 multipart、深层 JSON）全部 fail-open 且审计有记录 |
-| P2 | DSL 能加载并编译；regex / pm / contains / detectSQLi / detectXSS 算子可用；阶段 1/2 生效；语料回归跑通；`wafd test -r` 可用 |
-| P3 | 评分与阈值生效；detect/block 模式可热切；限速与临时封禁生效；白名单不误伤；压测达标（P99 < 1ms，吞吐降幅 < 15%） |
+| P0 | `wafd -c config.yaml` 起监听；profile 自动探测生效并打印内存预算表；`GOMEMLIMIT` / `GOGC` 按 profile 设置；并发连接上限、`MaxHeaderBytes`、读超时生效；curl 经其访问假上游返回一致内容；结构化访问日志；`/healthz` `/readyz`（含 profile 与预算详情）正常；SIGTERM 优雅停机不丢在途请求；`go vet ./...`、`go test ./...`、`gofmt -l` 全绿；`GOMAXPROCS=1` 下压测脚本能跑出对比表 |
+| P1 | 路径规范化与解码链单测全过；`BenchmarkParseQuery` 达到 0 allocs/op；fuzz 60s 无 crash；畸形请求（超长 URI、非法 %转义、截断 multipart、深层 JSON、解压炸弹）全部 fail-open 且审计有记录；各类上限超限行为符合 `PERFORMANCE.md` §5.2 表 |
+| P2 | DSL 能加载并编译；regex / pm / contains / detectSQLi / detectXSS 算子可用；**变换链去重与共享 AC 预筛生效**（启动日志打印不同链数量与自动机规模）；`BenchmarkEngine_NoMatch` 达到 0 allocs/op；阶段 1/2 生效；语料回归跑通；`wafd test -r` 可用 |
+| P3 | 评分与阈值生效；detect/block 模式可热切；限速与临时封禁生效且状态表容量上限可验证（伪造 IP 喷洒不涨内存）；白名单不误伤；`small` profile 压测达标（P99 < 0.5ms 纯转发、吞吐降幅 < 10%、满负载 RSS < 48 MiB）；L1–L4 降级可用且状态可见 |
 | P4 | 响应侧检测生效；零停机 reload（含失败回滚）验证通过；指标齐全；审计轮转正常；管理 API 鉴权生效 |
 | P5 | 内置规则集覆盖 SQLi/XSS/RCE/LFI/RFI/webshell/扫描器/协议/上传，每条有正负样本；误报治理报告产出；压测报告与运维文档齐 |
 
@@ -805,45 +834,66 @@ testdata/corpus/
 4. 该规则单独升级为拦截档（`mixed` 模式按类目控制），观察 24 小时。
 5. 全类目都达标后才切 `block`。
 
+### 17.5 性能门禁（**独立于功能测试，单独卡**）
+
+性能不是"以后优化"，是每个阶段的验收项。门禁脚本 `scripts/perf-gate.ps1` 超标即非零退出：
+
+| 门禁 | 阈值 | 卡在哪个阶段 |
+| --- | --- | --- |
+| `BenchmarkParseQuery` | 0 allocs/op | P1 |
+| `BenchmarkEngine_NoMatch` | 0 allocs/op，< 20µs/op | P2 |
+| `BenchmarkEngine_FullRules` | 候选规则数 < 10，< 45µs/op | P2 |
+| 端到端 wafd 自身新增分配 | ≤ 2 allocs/req | P2 起 |
+| `small` 纯转发附加延迟 | P99 < 0.5ms | P3 |
+| `small` 吞吐降幅 | < 10% | P3 |
+| `small` 空载 / 满负载 RSS | < 15 MiB / < 48 MiB | P3 |
+| 30 分钟压测 RSS 增长 | 无单调增长 | P3 |
+| 并发连接上限生效 | 超限 503，内存不涨 | P3 |
+| reload 期间失败请求数 | 0 | P4 |
+
+每次里程碑跑一次，报告落 `docs/bench/<tag>-<profile>.md`（报告进库，原始数据不进）。
+
 ---
 
 ## 18. 分阶段路线图
 
 ### P0 骨架（可运行）
 
-产出：仓库结构、`go.mod`、配置加载与校验、纯转发反向代理、结构化访问日志、`/healthz` `/readyz`、优雅停机、Makefile、CI（本地脚本）。
+产出：仓库结构、`go.mod`、配置加载与校验、**profile 自动探测（cgroup v2/v1 退化到 NumCPU + meminfo）与内存预算表**、`GOMEMLIMIT`/`GOGC` 设置、**连接与超时上限（`MaxHeaderBytes`、读超时、并发连接信号量）**、纯转发反向代理、结构化访问日志、`/healthz` `/readyz`、优雅停机、Makefile（`GOAMD64=v1` 钉死）、压测脚本骨架、CI（本地脚本）、systemd 单元模板。
 
-交付判据：能起服务、能转发、能停、测试通过。打 tag `v0.1.0-mvp`。
+交付判据：能起服务、能转发、能停、测试通过、`GOMAXPROCS=1` 下压测脚本能出对比表。打 tag `v0.1.0-mvp`。
+
+**P0 就把性能地基打好**（profile、上限、内存控制），而不是等功能齐了再补 —— 上限和池化是侵入式的，事后加会返工。
 
 ### P1 解析层
 
-产出：`parser` 全量（路径规范化、解码链、query/form/multipart/JSON/XML、解压、上限控制）、`tx` 包、fuzz 测试。
+产出：`parser` 全量（路径规范化、解码链、**零分配 query 解析器**、form/multipart/JSON/XML、解压、逐项上限控制）、`tx` 包与对象池、fuzz 测试。
 
-交付判据：畸形输入不崩、fail-open、审计可查。
+交付判据：畸形输入不崩、fail-open、审计可查、`BenchmarkParseQuery` 达到 0 allocs/op。
 
 ### P2 规则引擎
 
-产出：`transform`、`operator`（regex / pm / contains / startsWith / eq / detectSQLi / detectXSS / entropy / luhn / ipMatch）、`rules`（YAML 加载、编译、索引、预筛）、`engine` 阶段 1/2、`wafd test -r`、`docs/RULES.md` 定稿。
+产出：`transform`、`operator`（regex / pm / contains / startsWith / eq / detectSQLi / detectXSS / entropy / luhn / ipMatch）、`rules`（YAML 加载、编译、索引、**变换链去重 + 共享 Aho-Corasick 预筛**）、`engine` 阶段 1/2、`wafd test -r`、`scripts/perf-gate.ps1`、`docs/RULES.md` 定稿。
 
-交付判据：规则能写、能加载、能命中、能离线自测。
+交付判据：规则能写、能加载、能命中、能离线自测、`BenchmarkEngine_NoMatch` 达到 0 allocs/op。
 
 ### P3 决策与防护动作
 
-产出：评分累积、模式切换、`actions`（block/log/tarpit/challenge/custom page）、`ratelimit`（令牌桶 + 滑动窗口 + 临时封禁 + memory store）、`realip` 严格信任链、压测脚本与报告。
+产出：评分累积、模式切换、`actions`（block/log/tarpit/challenge/custom page）、`ratelimit`（令牌桶 + 滑动窗口 + 临时封禁 + **带容量上限与 LRU 淘汰的 memory store**）、**L1–L4 有界降级**、`realip` 严格信任链、压测脚本与 `small` profile 基线与报告。
 
-交付判据：压测达标，误报不炸。
+交付判据：`small` profile 压测达标、误报不炸、伪造源 IP 喷洒不打爆内存。
 
 ### P4 响应侧与运维
 
-产出：`audit`（JSON Lines + 轮转 + ring buffer）、`metrics`、`admin`（reload / rules / rule-test / events）、`alert`、状态 3/4 规则、零停机 reload 与失败回滚、TLS 与证书热加载、h2/h2c、Redis 限速后端（可选）。
+产出：`audit`（JSON Lines + 轮转 + ring buffer + 有界队列丢弃计数）、`metrics`（含池命中率、降级级别、内存预算）、`admin`（reload / rules / rule-test / events / pprof 默认关）、`alert`、状态 3/4 规则、零停机 reload 与失败回滚、TLS 与证书热加载、h2/h2c（按 profile 开关）、Redis 限速后端（可选）。
 
-交付判据：reload 零失败请求，指标齐全，探针正确。
+交付判据：reload 零失败请求且峰值内存符合预算表，指标齐全，探针正确，降级状态三处可见。
 
 ### P5 规则集与投产
 
-产出：全类目内置规则集（每条带正负样本）、误报治理报告、SecRules 兼容层（视情况）、运维手册、压测与容量报告、发布流程。
+产出：全类目内置规则集（每条带正负样本）、误报治理报告、SecRules 兼容层（视情况）、运维手册（含 systemd / Docker / 低配调优）、**真机 1 核 VPS 性能基线与容量报告**、发布流程。
 
-交付判据：检测模式 7 天数据支撑，逐类目切拦截。
+交付判据：检测模式 7 天数据支撑，逐类目切拦截；`small` profile 在真实 VPS 上的基线与 `PERFORMANCE.md` §2 目标对齐（不达标就改实现或改目标，不允许留一张对不上的表）。
 
 ---
 
@@ -869,6 +919,8 @@ testdata/corpus/
 5. **Redis 是否必须**：单副本部署时不需要。若确定多副本，P3 就要把 `Store` 接上，不要拖到上线前。
 6. **TLS 证书来源**：文件热加载 vs ACME 自动签发。建议先文件，ACME 后置。
 7. **是否要 GUI**：不做。管理走 API + 命令行。
+8. **目标 VPS 的确切规格**（vCPU / 内存 / 架构 / 是否由 wafd 终结 TLS）：决定 `small` profile 的验收数字能不能落地。见 `docs/PERFORMANCE.md` §11。没有真机，§2 的目标值只能标注为"未经实测"。
+9. **`small` 档的两处默认值**：阶段 4 响应体检测默认关、审计日志走 stdout 交 journald。前者牺牲检测覆盖，后者要求机器有 systemd。见 `PERFORMANCE.md` §11。
 
 ---
 
@@ -888,7 +940,7 @@ Content-Type: application/json
 
 1. `realip` → `203.0.113.7`（无 XFF，直接用对端）。
 2. 阶段 1：请求头无异常；`Content-Type: application/json` 决定 body 解析策略。
-3. 阶段 2：读 body（54 字节 < 1 MiB），递归展开 → `ArgsJSON["user"] = "admin'/**/UNION/**/SELECT/**/1,password/**/FROM/**/users--"`，同时并入 `Args`。
+3. 阶段 2：读 body（54 字节 < 128 KiB），递归展开 → `ArgsJSON["user"] = "admin'/**/UNION/**/SELECT/**/1,password/**/FROM/**/users--"`，同时并入 `Args`。
 4. 预筛：AC 机在 `Args` 值里命中字面量 `union`、`select` → 候选规则含 `SQLI-942100`。
 5. `SQLI-942100` 用 `t:removeComments,urlDecode,compressWhitespace,lowercase` 变换 → `admin' union select 1,password from users--`。
 6. `detectSQLi` 算子判定命中，`detail: "sqli fingerprint: union select"`，`target: ARGS:user`。
@@ -900,17 +952,26 @@ Content-Type: application/json
 ## 附录 B：配置示例（初稿，P0 实现后对齐）
 
 ```yaml
+profile: small             # small | medium | large | auto（按 cgroup 探测；探测失败按 small）
+                           # 下面的数值是 small 档默认值，medium/large 见 docs/PERFORMANCE.md §1
+
 listen:
   addr: "0.0.0.0:8080"
-  read_timeout: 30s
-  write_timeout: 60s
-  idle_timeout: 120s
+  max_header_bytes: 32768  # 默认 1MiB 太大，低配下是内存放大点
+  read_header_timeout: 5s  # 防 slowloris
+  read_timeout: 15s
+  write_timeout: 30s
+  idle_timeout: 60s
+  max_conns: 256           # 并发连接上限（信号量，超限 503）
+  http2: false             # small 档默认关
 
 upstream:
   url: "http://127.0.0.1:9000"
   dial_timeout: 5s
   response_header_timeout: 30s
-  max_idle_conns_per_host: 128
+  max_idle_conns_per_host: 16
+  idle_conn_timeout: 30s
+  tcp_nodelay: true
 
 tls:
   enabled: false
@@ -925,6 +986,8 @@ real_ip:
 engine:
   mode: detect             # detect | block | mixed
   fail_mode: open          # open | closed
+  degrade: auto            # auto | off —— 过载分级降级，见 docs/PERFORMANCE.md §8
+                           # block 模式下禁止自动降级到 L3/L4（宁可 503 也不静默放行）
   inbound_anomaly_threshold: 5
   outbound_anomaly_threshold: 4
 
@@ -935,11 +998,19 @@ rules:
   self_test: true
 
 limits:
-  max_inspect_body: 1048576
-  max_inspect_response: 524288
+  max_inspect_body: 131072      # 128 KiB（small）
+  max_inspect_response: 8192    # 8 KiB（small；阶段 4 默认关）
   max_uri_length: 8192
   max_headers: 100
+  max_params: 1000
+  max_param_value_len: 65536
   max_json_depth: 32
+  max_json_nodes: 10000
+  max_transform_depth: 8
+  max_prefilter_literals: 20000
+  max_rules: 400
+  ratelimit_table_capacity: 8192   # 必须有上限，否则伪造源 IP 喷洒可打爆内存
+  ring_buffer_size: 256
 
 ratelimit:
   enabled: true
@@ -982,6 +1053,10 @@ alert:
 - [ ] §10 评分阈值是否认可
 - [ ] §11 限速默认值是否认可
 - [ ] §12 响应侧检测范围是否认可
-- [ ] §15 性能目标是否认可
+- [ ] §15 性能目标与 profile 分级是否认可（`small` = 1 vCPU / 512 MiB 是最低支持线，见 `docs/PERFORMANCE.md`）
+- [ ] §17.5 性能门禁（0 allocs/op 等硬指标）是否认可 —— 这些会让开发速度变慢，但低配下省不掉
+- [ ] `small` 档的取舍：阶段 4 默认关、HTTP/2 默认关、超长值只扫前 8 KiB，是否接受
+- [ ] 过载降级策略：`small` 默认 `auto`、`block` 模式禁止降级到 L3/L4，是否认可
+- [ ] 目标 VPS 规格与是否提供真机做基线测量
 - [ ] §18 阶段划分与顺序是否认可（P0 骨架是否过轻）
 - [ ] §20 未决问题逐条定调
