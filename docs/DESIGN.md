@@ -968,7 +968,7 @@ testdata/corpus/
 8. **响应侧检测是否永远不做**：本轮按需求收窄砍掉。若将来要加，代价见 §12，需要重新算性能预算。
 9. **限速/封禁是否保留**：需求只提了"识别请求里的攻击 payload"，限速属于附加能力。当前设计保留（成本低、不涉及响应缓冲），默认开。若不需要，可整模块关掉。
 10. **目标 VPS**：已定 2 核 2 GiB（`medium` 为目标档），1 核 512 MiB 为保底线。**仍需一台真机跑基线**，否则 §15.3 的数字只能标注"未经实测"。
-11. **控制台认证默认模式**（`basic` 还是 `session`）与是否需要多用户/角色 —— 见 `docs/CONSOLE.md` §11。
+11. **控制台准入**：已定 —— 第一层 Basic 门槛挡扫描器（统一 401，不区分路径），第二层表单登录 + 会话做认证；门槛凭据与账号分开；TLS 强制（未配证书则自动自签）。是否要再加一层随机路径见 `docs/CONSOLE.md` §11。
 12. **多站点（P7）是否真要做**：当前单站点，数据结构按 `[]Site` 预留。若确定要，P4 的 `Snapshot` 结构就要一次到位，别等 P7 再动。
 13. **payload 展示**：已定用绝对代码模式（`<pre><code>` + `textContent`，全站禁 `innerHTML`，CI 门禁）。列表页只显示摘要，详情页展开代码块；原文是否落盘仍由 `log.capture_payload` 控制，默认关。
 
@@ -1087,13 +1087,22 @@ metrics:
 admin:
   enabled: true
   addr: "0.0.0.0:9443"      # 控制台 + /api/v1 监听地址
-  gate:                     # 第一层：防扫描器（不是安全边界）
-    mode: path_token        # path_token | drop | basic | none（可与 drop 叠加）
-    path_token: ""          # 空则启动时生成 32 位随机串并打印；填了就用自己的
-    drop_unmatched: true    # 未过门槛的连接直接断开而非返回 404
-    probe_ban_window: 60s   # 同 IP 触发门槛失败
-    probe_ban_after: 20     # 达此次数
+  gate:                     # 第一层：Basic 门槛，挡扫描器（不是安全边界）
+    enabled: true
+    mode: basic             # basic（默认）| none
+    realm: "Restricted"     # 中性字符串，不暴露产品特征
+    username: "gate"
+    password_hash: ""       # 与登录账号分开；为空则自动生成并打印
+    path_token: ""          # 可选额外一层：控制台挂随机路径（Basic 已挡住路径暴露，非必需）
+    exempt_api_token: true  # 带 X-Donothack-Token 的请求跳过门槛，方便 CLI
+    probe_ban_window: 60s   # 同 IP 门槛失败窗口
+    probe_ban_after: 20     # 达此次数则封禁
     probe_ban_duration: 15m
+  tls:
+    enabled: true           # 门槛用 Basic ⇒ TLS 强制
+    cert_file: ""           # 为空则首次启动自动生成自签证书并打印指纹
+    key_file: ""
+    auto_self_signed: true
   auth_mode: session        # 第二层：session | session+basic
   username: "admin"
   password_hash: ""         # PBKDF2-HMAC-SHA256 600k 迭代；为空则控制台不启动并打印生成命令
@@ -1134,7 +1143,7 @@ alert:
 - [x] **必须有 Web 控制台**（对标雷池），单站点先行、多站点后置 P7
 - [x] 控制台前端用原生 ES module SPA，不引 Node 构建链
 - [x] 控制台可公网访问 —— 因此 TLS、登录失败锁定、写操作自定义头 + Origin 校验为**强制项**
-- [x] 控制台分两层：**访问门槛防扫描器**（`path_token` → 404，可叠加断连）与**正式登录做认证**（表单登录 + 会话）；Basic 降级为可选的脚本通道
+- [x] 控制台准入：第一层 **HTTP Basic 门槛**（未过则一切路径统一 401，登录页/路径/API/产品指纹整体不可见），第二层**表单登录 + 会话**做认证；门槛凭据与登录账号分开；因门槛用 Basic，TLS 强制（首次启动自动生成自签证书）
 - [x] payload 展示用**绝对代码模式**（`<pre><code>` + `textContent`，全站禁 `innerHTML` 并加 CI 门禁，不引第三方 markdown 库）——“看得见”与“安全”同时满足
 
 仍待确认：
@@ -1149,6 +1158,6 @@ alert:
 - [ ] 是否提供真机（2 核 2 GiB）跑一次基线，否则目标值只能标注"未经实测"
 - [ ] §18 阶段划分与顺序是否认可（P0 骨架是否过轻）
 - [ ] §20 未决问题逐条定调
-- [ ] 控制台认证默认模式与是否需要多用户/角色（见 `docs/CONSOLE.md` §11）
+- [ ] 控制台是否需要多用户与角色（管理员 / 只读运维）
 - [ ] 事件保留默认 7 天 / 512 MiB 是否合适
-- [ ] 门槛随机路径是否需要支持自定义（用自己记得住的 vs 全随机）
+- [ ] 是否需要门槛之外的随机路径（Basic 已挡住路径暴露，此层只是顺手便宜）
