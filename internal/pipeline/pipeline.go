@@ -278,6 +278,11 @@ func (p *Pipeline) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 与应用的绝对链接生成，等检测阶段再管就晚了。
 	if allowed := p.o.AllowedHosts; allowed != nil && !allowed(r.Host) {
 		p.hostRejected.Add(1)
+		// 标识是**哪一层**拒的。看起来只是调试便利，实际很要紧：
+		// 验收时语料全红（400 而不是 403）就是因为请求在 Host 白名单层就被拒、
+		// 根本没走到规则，而当时没有任何线索说明这一点 ——
+		// 看起来像"规则集体失效"，实际是另一层生效了。
+		rejectLayer(w, "host")
 		if rec != nil {
 			rec.Verdict = "host_rejected"
 			rec.Reason = "Host 不在允许列表内"
@@ -294,6 +299,7 @@ func (p *Pipeline) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// block/mixed 模式下检测能力一旦下降，宁可 503 也不放行未经检测的流量。
 	if p.o.Degrader != nil && p.o.Degrader.ShouldReject() {
 		p.rejected.Add(1)
+		rejectLayer(w, "degrade")
 		st := p.o.Degrader.Stats()
 		p.record(&tx.Transaction{ID: txIDFrom(rec), ClientIP: ipRes.IP}, engine.Decision{
 			Verdict: tx.VerdictBlock, Mode: "degraded",
@@ -316,8 +322,10 @@ func (p *Pipeline) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			p.rateLimited.Add(1)
 			status := http.StatusTooManyRequests
 			category := "ratelimit"
+			rejectLayer(w, "ratelimit")
 			if d.Banned {
 				category = "ban"
+				rejectLayer(w, "ban")
 			}
 			retry := int(d.RetryAfter.Seconds())
 			if retry <= 0 {
@@ -678,4 +686,12 @@ func peerAddr(remoteAddr string) string {
 		}
 	}
 	return remoteAddr
+}
+
+// rejectLayer 在响应上标注是**哪一层**拒绝了这次请求。
+//
+// 只标层级，不透露配置细节（例如具体放了哪些 Host）—— 运维能定位，
+// 攻击者拿不到额外信息。
+func rejectLayer(w http.ResponseWriter, layer string) {
+	w.Header().Set("X-Donothack-Reject", layer)
 }
