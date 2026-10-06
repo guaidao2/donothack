@@ -32,25 +32,24 @@ func (rs *RuleSet) Match(t *tx.Transaction, p tx.Phase, sc *EvalScratch, emit fu
 	}
 
 	// ---- 1) 预筛 ----
+	//
+	// **这里刻意不用回调**：`expandCollection(..., func(...))` 的闭包会捕获
+	// bits/sc/rs 并逃逸到堆上，每请求多出几次分配。改成按下标直接迭代
+	// （参数类集合走 paramsOf，标量集合走 collectionValues），
+	// AC 扫描也改用 ScanBits 直接写位图。
 	if idx.prefilte != nil && len(rs.chains) > 0 {
+		var scalars [2][]byte
 		for _, col := range idx.collections {
-			expandCollection(&t.Vars, col, func(_ string, val []byte) bool {
-				if len(val) == 0 {
-					return true
+			if ps, ok := paramsOf(&t.Vars, col); ok {
+				for i := 0; i < ps.Len(); i++ {
+					rs.prefilterValue(ps.ValueAt(i), idx, bits, sc)
 				}
-				for ci := range rs.chains {
-					out := applyChain(rs.chains[ci].Fns, sc, val)
-					if len(out) == 0 {
-						continue
-					}
-					idx.prefilte.Scan(out, func(id int32, _ int) bool {
-						w := int(id) >> 6
-						bits[w] |= 1 << uint(id&63)
-						return true
-					})
-				}
-				return true
-			})
+				continue
+			}
+			n := collectionValues(&t.Vars, col, &scalars)
+			for i := 0; i < n; i++ {
+				rs.prefilterValue(scalars[i], idx, bits, sc)
+			}
 		}
 	}
 
@@ -65,6 +64,20 @@ func (rs *RuleSet) Match(t *tx.Transaction, p tx.Phase, sc *EvalScratch, emit fu
 				return
 			}
 		}
+	}
+}
+
+// prefilterValue 把一个值过一遍所有变换链，命中的字面量写进位图。
+func (rs *RuleSet) prefilterValue(val []byte, idx *phaseIndex, bits []uint64, sc *EvalScratch) {
+	if len(val) == 0 {
+		return
+	}
+	for ci := range rs.chains {
+		out := applyChain(rs.chains[ci].Fns, sc, val)
+		if len(out) == 0 {
+			continue
+		}
+		idx.prefilte.ScanBits(out, bits)
 	}
 }
 

@@ -387,3 +387,44 @@ webhook 挂掉不影响数据面、TOTP 全流程（未校验不激活 / 错误�
 * `scripts/passthrough.py`：`--waf host:port` 少写 `http://` 时 urllib 抛
   `unknown url type`，脚本会把**每条**都判成"不一致"，满屏红色差异看起来像 WAF 篡改了响应。
   现在缺 scheme 自动补全。
+
+## [2026-10-06] 修一个真实的编码载荷绕过 + 项目署名（tag `v1.0.0-rc2`）
+
+### 安全修复：`base64(JSON)` 参数里的注入完全绕过（Critical）
+
+crackweb 定向扫描报出两条注入 finding —— 而同样的 payload **明文放在普通参数里是拦得住的**：
+
+```
+[Critical] SQL injection (error-based)        query:id.id  Payload: '
+[High]     SQL injection (boolean-based blind) query:id.id  Payload: 1 AND 1=2
+```
+
+两个根因，缺一不可：
+
+1. **展开结果没进规则实际匹配的集合**：59 条规则全部对着 `ARGS`（合并视图）匹配，
+   而 `ARGS` 在 `ParseRequest` 末尾构造，`ExpandNestedDocs` 却在其**之后**执行且只写
+   `ArgsJSON` —— 展开进了一个规则看不见的副本，等价于完全没展开。
+   原来的单测只断言"`ArgsJSON` 里有 payload"，恰好绕过了这个问题。
+2. **指纹覆盖缺口**：`detectSQLi` 只认**恒真**比较（`1=1`），
+   而布尔盲注用的是**矛盾式**（`1 AND 1=2`）；单独引号 `'` 也没有任何指纹。
+
+修复：
+* `ExpandNestedDocs` 同时写 `Args` 与 `ArgsJSON`；
+* 新增 `boolean comparison` 指纹（不区分真假）与 `quote probing` 指纹
+  （只认"整值就是引号"或"数字后紧跟引号"，`O'Brien` / `it's` 一律不碰）；
+* 回归测试 `internal/engine/nested_doc_test.go`：**从引擎裁决这一端**写 6 条（4 正 2 反）；
+* 语料新增 positive 5 条、negative 2 条。
+
+验证：定向重扫 **4 → 1 条，注入类 4 → 0**；语料 47 例 **28/28 拦、18/18 放**；
+规则自测通过；透传 6/6 一致。
+
+### 重要方法学发现
+
+**完整爬取没有覆盖到编码绕过，定向扫描才覆盖到。**
+`crawl` 模式对发现到的参数用固定 payload 集；`scan -u` 模式会做结构推导 + 编码代数升级。
+验收必须**两种模式都跑**（复现命令见 ACCEPTANCE.md）。
+
+### 署名
+
+项目作者标注为 **guaidao2 & coolmoon**（README + `donothack version` 输出，
+后者随二进制走，发布出去的包也带作者）。

@@ -183,6 +183,36 @@ func (m *Matcher) Scan(hay []byte, fn func(id int32, endOffset int) bool) {
 	}
 }
 
+// ScanBits 把所有命中模式的 ID 直接写进位图（**无回调**）。
+//
+// 预筛只关心"哪些规则被触发"，用回调会让闭包捕获外层变量并逃逸到堆上 ——
+// 热路径上每请求都会因此多出几次分配。位图布局用调用方的约定：
+// id>>6 是字下标，id&63 是位下标（与规则 ID 的位图一致）。
+func (m *Matcher) ScanBits(hay []byte, bits []uint64) {
+	if m.patterns == 0 || len(hay) == 0 || len(bits) == 0 {
+		return
+	}
+	cur := int32(0)
+	for i := 0; i < len(hay); i++ {
+		cur = m.nextState(cur, hay[i])
+		for _, id := range m.nodes[cur].out {
+			w := int(id) >> 6
+			if w < len(bits) {
+				bits[w] |= 1 << uint(id&63)
+			}
+		}
+		for dl := m.nodes[cur].dictLink; dl >= 0; {
+			for _, id := range m.nodes[dl].out {
+				w := int(id) >> 6
+				if w < len(bits) {
+					bits[w] |= 1 << uint(id&63)
+				}
+			}
+			dl = m.nodes[dl].dictLink
+		}
+	}
+}
+
 // MatchAny 报告是否有任意模式命中（比 Scan 快，适合只关心布尔结果的场景）。
 func (m *Matcher) MatchAny(hay []byte) bool {
 	found := false

@@ -1202,3 +1202,34 @@ fail 链跨边界 / 空模式忽略 / 命中位置）。这个 bug 是规则集�
 于是加了安全判据，覆盖率回到 37/57 可预筛、20 条每请求评估（35%）。
 
 取舍是明确的：**宁可多花 CPU，不可静默漏检**。提高预筛率的正解是让规则多用 `pm`。
+
+### 8.7 值级文档展开（**载荷不一定是明文的**）
+
+> 这一条是用一个真实绕过换来的，写在最前面：**攻击载荷不一定以明文出现在参数值里**。
+> crackweb 1.6.4 用 `?id=<base64(JSON)>` 的形式把 SQL 注入藏在编码后的参数文档里，
+> 拿到了 Critical / High 两条 finding —— 而同样 payload 明文放在普通参数里是拦得住的。
+
+展开链路（`parser.ExpandNestedDocs`，由 `engine.Options.ExpandNestedDocs` 开启）：
+
+1. 参数值以 `{` / `[` 开头 → 按 JSON 递归展开，键路径以 `.` 连接（`id.uid`、`doc.a.b`）；
+2. 否则尝试 base64 解码，解码结果再按 JSON 展开（`base64(JSON)` 两层）；
+3. 展开结果按 `<外层参数名>.<内层路径>` 命名。
+
+**两条必须守住的不变量（都踩过）**：
+
+* **展开结果必须同时进入规则实际匹配的集合。** 规则绝大多数对着 `ARGS`（合并视图）匹配，
+  而 `ARGS` 是在 `ParseRequest` 末尾由 `MergeInto` 构造的。最初展开只写 `ArgsJSON`，
+  且发生在合并**之后** —— 于是展开进了一个**规则看不到的副本**，等价于完全没展开。
+  现在 `ExpandNestedDocs` 同时写 `Args` 与 `ArgsJSON`。
+* **测试必须从"规则能不能拦"这一端写。** 原来的单测只断言"展开函数产出了字段"
+  （`ArgsJSON` 里有 payload），恰好绕过了上面那个问题。
+  回归测试在 `internal/engine/nested_doc_test.go`，断言的是**引擎裁决为 block**。
+
+配套的指纹覆盖（`operator.detectSQLi`）也补了两处：原来只认**恒真**比较
+（`1=1`、`2>1`），而布尔盲注用的是**矛盾式**（`1 AND 1=2`）—— 只认恒真就是漏；
+另外单独引号 `'` 这种错误型探测形态此前没有任何指纹，现在由"语法性引号"判据覆盖
+（只认整值就是引号、或数字后紧跟引号；`O'Brien`、`it's` 一律不碰）。
+
+覆盖这三类的语料：`testdata/corpus/positive/sqli-base64-json-*.http`、
+`sqli-single-quote-probe.http`、`sqli-boolean-false.http`，
+以及反面对照 `negative/normal-json-document-param.http`、`normal-apostrophe-text.http`。

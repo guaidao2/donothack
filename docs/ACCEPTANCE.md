@@ -218,3 +218,86 @@ crackweb 的 payload 是**推导**出来的：基代 `{{1999*1999}}` 被拦后�
   不是漏拦。若要严格归零，只能上响应侧检测（与本项目设计范围冲突）。
 * **真机 2C2G 基线**：需要一台目标档 VPS 才能测，本机数字不作承诺。
 * `BenchmarkEngine_NoMatch` 的 0 allocs/op 门禁（实测 21，方案见 PERFORMANCE.md 附录 P6）。
+
+---
+
+## 第三轮：编码载荷绕过（**已修**，tag `v1.0.0-rc2`）
+
+### 发现
+
+crackweb 1.6.4 用**定向扫描**打 `?id=<base64(JSON)>` 形态的接口时，拿到了 4 条 finding，
+其中两条是**注入类**：
+
+```
+[Critical] SQL injection (error-based)        query:id.id   Payload: '
+[High]     SQL injection (boolean-based blind) query:id.id   Payload: 1 AND 1=2
+```
+
+关键点：**同样的 payload 明文放在普通参数里是拦得住的**（403），
+编码进 base64(JSON) 之后完全绕过（200）。这正是"载荷不一定是明文的"。
+
+### 根因（两层，缺一不可）
+
+1. **展开结果没进规则实际匹配的集合。**
+   `ParseRequest` 末尾用 `MergeInto` 构造 `ARGS` 合并视图，而 59 条规则**全部**对着 `ARGS` 匹配；
+   `ExpandNestedDocs`（值级文档展开）却是在这之后执行、且只写 `ArgsJSON` ——
+   展开进了一个**规则看不到的副本**，等价于完全没展开。
+   原来的单测只断言"`ArgsJSON` 里有 payload"，恰好绕过了这个问题。
+2. **指纹覆盖缺口。** `detectSQLi` 只认**恒真**比较（`1=1`、`2>1`），
+   而布尔盲注用的是**矛盾式**（`1 AND 1=2`）—— 只认恒真就是漏检；
+   单独的引号 `'`（错误型注入的经典探测）则完全没有任何指纹。
+
+### 修复
+
+| 层 | 改动 |
+| --- | --- |
+| parser | `ExpandNestedDocs` 同时写 `Args`（规则实际匹配的合并视图）与 `ArgsJSON` |
+| operator | 新增 `boolean comparison` 指纹：`and/or` + 操作数 + 比较符 + 操作数，**不区分真假** |
+| operator | 新增 `quote probing` 指纹：整值就是引号、或数字后紧跟引号（`1'`） |
+| 测试 | `internal/engine/nested_doc_test.go`：**从"引擎裁决"这一端**写 6 条回归（4 正 2 反） |
+| 语料 | 新增 positive 5 条、negative 2 条（含 `O'Brien`、`it's a nice day` 反面对照） |
+
+### 验证
+
+| 项 | 结果 |
+| --- | --- |
+| 定向重扫（同一 URL，2603 请求 / 7.4s） | 4 条 → **1 条**，**注入类 0**（只剩 `exposed-path` swagger，应用侧） |
+| 语料验收 | 47 例：**positive 28/28 拦、negative 18/18 放**、detect 1/1 |
+| 规则集自测 | 全部正负样本通过 |
+| 透传保真度 | 6/6 一致 |
+| 逐 payload 离线核对 | 10 例全对（含 `O'Brien`、`it's a nice day` 不误报） |
+
+### 教训（写进了 docs/DESIGN.md §8.7）
+
+* **载荷不一定是明文的** —— 值可能是 JSON、base64(JSON)、多层编码，展开是必需的，不是可选的。
+* **展开之后的字段必须落到规则真正匹配的集合里** —— "产出了字段"和"规则能看到"是两件事。
+* **测试要从结论这一端写**：断言"引擎拦住了"而不是"函数产出了字段"。
+  前者能挡住这次这个 bug，后者挡不住。
+
+### 第三轮补充：**完整爬取没有覆盖到编码绕过，定向扫描才覆盖到**
+
+这一点比数字本身重要，写下来避免下次又只看一个数：
+
+| 扫描方式 | 请求数 | findings | 主动注入类 | 是否打到 `base64(JSON)` 绕过 |
+| --- | --- | --- | --- | --- |
+| 完整爬取（`crawl --depth 2`） | 31910 | 13 | 3（裸算术 SSTI） | **没有** |
+| 定向扫描（`scan -u .../id-b64-json?id=...`） | 2603 | **4 → 1** | **4 → 0** | **有** |
+
+原因：`crawl` 模式对**发现到的参数**用固定 payload 集；
+而 `scan -u` 模式会对给定 URL 的参数做**结构推导 + 编码代数升级**
+（把值当 JSON 解析、逐字段注入、再套 base64）。编码型绕过只有后者能打出来。
+
+⇒ **验收流程同时跑两种模式**，只看爬取的数字会漏掉整整一类绕过。
+
+复现命令（两行，可重跑）：
+
+```bash
+# 1) 完整爬取
+.tmp/crackweb/crackweb_1.6.4_windows_amd64/crackweb.exe crawl \
+  -u http://127.0.0.1:18080 --depth 2 --max-pages 25 --rate 40 -o .tmp/p6/crawl.json
+
+# 2) 定向扫描（编码参数文档这条线）
+.tmp/crackweb/crackweb_1.6.4_windows_amd64/crackweb.exe scan \
+  -u "http://127.0.0.1:18080/user/id-b64-json?id=eyJ1aWQiOjEsIm1sIjoiMSJ9" \
+  -o .tmp/p6/targeted-b64json.json
+```

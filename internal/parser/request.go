@@ -149,11 +149,21 @@ func parseBodyInto(v *tx.Collections, sc *Scratch, mimeType, contentType string,
 //
 // 这是为 crackweb 的"编码后的参数文档"手法准备的：
 // 参数值本身是 JSON（可能再套一层 base64）时，payload 藏在文档字段里，
-// 只比对整串值会漏掉。展开后按 <外层键>.<内层路径> 追加到 ArgsJSON。
+// 只比对整串值会漏掉。
+//
+// **展开结果必须同时写进 ARGS 合并视图**，这是一个真实绕过换来的教训：
+// 原先只写 ArgsJSON，而 `MergeInto` 构造 ARGS 的动作发生在 ParseRequest 末尾、
+// 即展开之前 —— 于是展开出来的字段进了一个**规则看不到的副本**，
+// 等价于完全没展开。实测 `?id=<base64({"id":"1' UNION SELECT ..."})>`
+// 明文同样的 payload 拦得住、编码后完全绕过（crackweb 报 Critical）。
 //
 // 必须显式调用（不在 ParseRequest 里默认做），因为它有 CPU 成本，
 // 且只在存在相关规则时才值得付出。
 func ExpandNestedDocs(v *tx.Collections, sc *Scratch, lim Limits) {
+	// 规则绝大多数对着 ARGS 匹配，所以 Args 是主目的地；
+	// ArgsJSON 也写一份，给显式声明 ARGS_JSON 的规则用。
+	expandInto(&v.Args, &v.ArgsGet, sc, lim, 1)
+	expandInto(&v.Args, &v.ArgsPost, sc, lim, 1)
 	expandInto(&v.ArgsJSON, &v.ArgsGet, sc, lim, 1)
 	expandInto(&v.ArgsJSON, &v.ArgsPost, sc, lim, 1)
 }

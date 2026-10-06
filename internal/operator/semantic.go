@@ -121,6 +121,12 @@ func sqliFingerprint(in []byte, minLen int) string {
 		return "stacked query"
 	}
 
+	// 1.5) 布尔比较：**不管是恒真还是矛盾**。
+	// 攻击者做布尔盲注用的是矛盾式（`1 AND 1=2`），只认恒真就成了漏检。
+	if booleanComparison(s) {
+		return "boolean comparison"
+	}
+
 	// 2) 需要引号上下文的特征
 	if hasQuote {
 		if subqueryFingerprint(s) {
@@ -132,6 +138,12 @@ func sqliFingerprint(in []byte, minLen int) string {
 		if tautology(s) {
 			return "boolean tautology"
 		}
+	}
+
+	// 2.5) 语法性引号（错误型注入的探测形态）：整值就是引号，或 `1'`。
+	// 放在引号上下文之后、弱特征之前 —— 它不依赖长度。
+	if quoteProbing(s) {
+		return "quote probing"
 	}
 
 	// 3) 弱特征：只在输入足够长时才认（避免 "1=1" 这类短文本误报）
@@ -146,6 +158,9 @@ func sqliFingerprint(in []byte, minLen int) string {
 		}
 		if containsAnyOf(s, " or ", " and ") && strings.Contains(s, "=") && hasQuote {
 			return "boolean expression"
+		}
+		if booleanComparison(s) {
+			return "boolean comparison"
 		}
 	}
 	return ""
@@ -303,7 +318,15 @@ func lowerASCII(in []byte) string {
 	return string(out)
 }
 
+// collapseSpaces 折叠连续空白。
+//
+// **先判断有没有要折叠的**：`strings.Builder.Grow` 是无条件分配的，
+// 而正常请求里的值绝大多数根本不需要折叠（没 TAB、没有连续空格）——
+// 于是每个请求白搭几次分配。实测这一处占热路径分配的 3/次。
 func collapseSpaces(s string) string {
+	if !needsCollapse(s) {
+		return s
+	}
 	var sb strings.Builder
 	sb.Grow(len(s))
 	prev := false
@@ -322,6 +345,23 @@ func collapseSpaces(s string) string {
 		prev = false
 	}
 	return sb.String()
+}
+
+// needsCollapse 判断是否存在需要折叠的空白。
+//
+// 两类：连续空白，以及 TAB/换行（它们会被折成单个空格，即使只有一个）。
+func needsCollapse(s string) bool {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\t', '\n', '\r':
+			return true
+		case ' ':
+			if i > 0 && s[i-1] == ' ' {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------- XSS

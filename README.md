@@ -1,5 +1,8 @@
 # donothack
 
+> 作者：**guaidao2 & coolmoon**
+> 用途：请求侧 Web 应用防火墙（自建，非玩具实现）。
+
 一个用 Go 写的 Web 应用防火墙（WAF），以独立反向代理形态部署在业务服务之前，单二进制、无 CGO。
 
 二进制名 `donothack`，模块路径 `donothack`。

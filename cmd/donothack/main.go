@@ -54,7 +54,7 @@ func main() {
 		case "test":
 			os.Exit(runTestCmd(args[1:]))
 		case "version":
-			fmt.Println(version.Info())
+			fmt.Println(version.Full())
 			return
 		case "help", "-h", "--help":
 			usage()

@@ -271,7 +271,14 @@ func IsTextContentType(ct string) bool {
 }
 
 // SplitContentType 拆出 mime 与 charset。
+//
+// 绝大多数 Content-Type 没有 charset（也没有分号），所以先走"没有分号"的快路径：
+// `strings.Split` 即使对空串也会分配一个切片，而这是每个带 body 的请求都要走的。
 func SplitContentType(ct string) (mime, charset string) {
+	if i := strings.IndexByte(ct, ';'); i < 0 {
+		// strings.ToLower 在无需改动时返回原串（零分配）
+		return strings.ToLower(strings.TrimSpace(ct)), ""
+	}
 	parts := strings.Split(ct, ";")
 	mime = strings.ToLower(strings.TrimSpace(parts[0]))
 	for _, p := range parts[1:] {
