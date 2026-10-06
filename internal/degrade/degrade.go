@@ -158,10 +158,25 @@ func (d *Degrader) ShouldReject() bool {
 	lvl := d.Level()
 	switch d.o.Mode {
 	case "block", "mixed":
+		// 拦截模式下检测能力下降就不能放行 —— 宁可 503 也不能放未检测的流量过去。
 		return lvl >= L2
 	default:
-		return lvl >= L4
+		// detect 模式**永远不该返回 503**：它本来就只记录、不拦截，
+		// "降级"在它这里的含义是"少做点检测"，而不是"拒绝服务"。
+		// 之前这里返回 lvl >= L4，把只记录的实例变成了会 503 的实例 ——
+		// 语义错了，压测里表现为"全部非 2xx"。
+		return false
 	}
+}
+
+// Bypass 报告是否应当完全跳过检测（只转发）。
+//
+// detect 模式在 L4 时走这条：检测本来就不拦人，跳过它只是省 CPU。
+func (d *Degrader) Bypass() bool {
+	if !d.o.Enabled {
+		return false
+	}
+	return d.o.Mode != "block" && d.o.Mode != "mixed" && d.Level() >= L4
 }
 
 // Reason 返回可读的降级原因。
@@ -217,24 +232,37 @@ func (d *Degrader) sample() {
 
 	trig.GCCPUFrac = gcCPUFraction()
 
-	// 目标档位
-	target := L0
-	reason := "正常"
-	switch {
-	case trig.HeapRatio >= 0.95 || trig.GCCPUFrac >= 0.50:
-		target, reason = L4, "内存或 GC 压力极高"
-	case trig.HeapRatio >= 0.90 || trig.GCCPUFrac >= 0.35:
-		target, reason = L3, "内存或 GC 压力很高"
-	case trig.HeapRatio >= 0.80 || trig.GCCPUFrac >= 0.20:
-		target, reason = L2, "内存或 GC 压力偏高"
-	case trig.RejectsRate > 50 || (d.o.MaxInflight > 0 && trig.Inflight > d.o.MaxInflight):
-		target, reason = L2, "拒绝速率或在途请求数偏高"
-	case trig.HeapRatio >= 0.70 || d.rejectRate > 5:
-		target, reason = L1, "内存占用偏高"
-	}
+	// 目标档位。
+	//
+	// **GC CPU 占比的阈值必须放对量级**：Go 的 GC pacer 默认就把 25% 的 CPU
+	// 花在 GC 上，所以 0.2 左右是**正常状态**，不是压力。之前把 L2 定在 0.20、
+	// L4 定在 0.50，压测一上来就直接跳到 L4 —— 那不是"过载保护"，
+	// 那是把正常负载当成故障、然后自己返回 503。
+	target, reason := d.decideLevel(trig)
 	trig.Reason = reason
 
 	d.apply(target, trig)
+}
+
+// decideLevel 由指标决定目标档位。
+//
+// 单独抽出来是为了**可测**：阈值这种东西必须能被单测钉住，
+// 否则调参时很容易把"正常负载"判成"过载"（真踩过：GC 占比 0.2 被当成压力，
+// 一压测就跳到 L4 然后全部返回 503）。
+func (d *Degrader) decideLevel(trig Trigger) (Level, string) {
+	switch {
+	case trig.HeapRatio >= 0.95 || trig.GCCPUFrac >= 0.80:
+		return L4, "内存或 GC 压力极高"
+	case trig.HeapRatio >= 0.90 || trig.GCCPUFrac >= 0.65:
+		return L3, "内存或 GC 压力很高"
+	case trig.HeapRatio >= 0.80 || trig.GCCPUFrac >= 0.50:
+		return L2, "内存或 GC 压力偏高"
+	case trig.RejectsRate > 50 || (d.o.MaxInflight > 0 && trig.Inflight > d.o.MaxInflight):
+		return L2, "拒绝速率或在途请求数偏高"
+	case trig.HeapRatio >= 0.70 || trig.GCCPUFrac >= 0.35 || trig.RejectsRate > 5:
+		return L1, "内存或 GC 占用偏高"
+	}
+	return L0, "正常"
 }
 
 // apply 带滞回地切换档位。
@@ -244,12 +272,18 @@ func (d *Degrader) apply(target Level, trig Trigger) {
 		d.trigger.Store(&trig)
 		return
 	}
-	// 滞回：降级立刻生效（安全优先），恢复要"目标档位明显低于当前档位"才动。
+	// 滞回：降级立刻生效（安全优先），恢复要等指标确实回落。
+	//
+	// **恢复条件写错过一次**：原来是 `gc < 0.10`，而持续负载下 GC 占比
+	// 长期在 0.15 上下 —— 于是一旦因为某个尖峰进了降级态，就**再也出不来**，
+	// 整个进程持续 503。现在把"回落"定义成"低于最轻档位的进入阈值"（0.25 上下），
+	// 既不会抖动，也不会卡死。
 	if target > cur {
 		d.setLevel(target, trig)
 		return
 	}
-	if cur-target >= 1 && trig.HeapRatio < 0.60 && trig.GCCPUFrac < 0.10 && trig.RejectsRate < 1 {
+	recovered := trig.HeapRatio < 0.60 && trig.GCCPUFrac < 0.25 && trig.RejectsRate < 1
+	if target < cur && recovered {
 		d.setLevel(target, trig)
 		return
 	}

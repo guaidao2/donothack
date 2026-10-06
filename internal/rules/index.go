@@ -128,6 +128,9 @@ type EvalScratch struct {
 	vals    []byte
 	variant []byte
 	hits    []Hit
+	// ctx 是复用的算子求值上下文。**不要每请求新建一个再取地址** ——
+	// 取复合字面量的地址会让它逃逸到堆上，每个规则求值一次就是一次分配。
+	ctx operator.EvalCtx
 }
 
 // Hit 是一次命中。

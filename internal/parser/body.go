@@ -27,7 +27,13 @@ import (
 //
 // 只缓冲到 maxRaw 字节；超出部分标记 truncated，但不影响转发（剩余部分照常流式转发）。
 func ReadBodyForInspection(r *http.Request, sc *Scratch, maxRaw int) (raw, inspect []byte, truncated bool, errs []string) {
-	if r.Body == nil || maxRaw <= 0 {
+	// 无 body 的请求直接返回：`http.NoBody` 不是 nil，若不早退就会给它套一层
+	// MultiReader —— 那是一次纯浪费的分配，而且发生在**每个** GET 上。
+	if r.Body == nil || r.Body == http.NoBody || maxRaw <= 0 {
+		return nil, nil, false, nil
+	}
+	// ContentLength 为 0 且没有分块传输：确定没有 body。
+	if r.ContentLength == 0 && len(r.TransferEncoding) == 0 {
 		return nil, nil, false, nil
 	}
 

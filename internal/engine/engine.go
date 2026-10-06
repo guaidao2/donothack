@@ -63,6 +63,9 @@ type Engine struct {
 	exceptions atomic.Pointer[[]*rules.Exception]
 
 	scratchPool sync.Pool
+	// parserScratch 池：解析期的解码缓冲（key/val/body/path）。
+	// 不池化的话每个请求都要重新分配这六七块切片 —— 那正是"热路径零分配"漏掉的地方。
+	parserScratch sync.Pool
 }
 
 // New 构造引擎。
@@ -79,6 +82,7 @@ func New(o Options) *Engine {
 	e := &Engine{opts: o}
 	e.rs.Store(o.RuleSet)
 	e.scratchPool.New = func() any { return &rules.EvalScratch{} }
+	e.parserScratch.New = func() any { return &parser.Scratch{} }
 	return e
 }
 
@@ -162,8 +166,11 @@ func (e *Engine) Process(ctx context.Context, t *tx.Transaction, req *http.Reque
 		lim.MaxInspectBody = 0
 	}
 
-	sc := &parser.Scratch{}
-	defer sc.Reset()
+	ps := e.parserScratch.Get().(*parser.Scratch)
+	defer func() {
+		ps.Reset()
+		e.parserScratch.Put(ps)
+	}()
 
 	// 解析层的 panic 已在 parser 内部兜住；这里再兜一层，
 	// 因为规则评估也可能碰到意料之外的输入。
@@ -173,9 +180,9 @@ func (e *Engine) Process(ctx context.Context, t *tx.Transaction, req *http.Reque
 				t.Vars.AddParseError("引擎 panic")
 			}
 		}()
-		parser.ParseRequest(t, req, sc, lim)
+		parser.ParseRequest(t, req, ps, lim)
 		if e.opts.ExpandNestedDocs {
-			parser.ExpandNestedDocs(&t.Vars, sc, lim)
+			parser.ExpandNestedDocs(&t.Vars, ps, lim)
 		}
 	}()
 

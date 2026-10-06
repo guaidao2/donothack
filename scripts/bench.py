@@ -46,6 +46,28 @@ def log(msg: str) -> None:
     print(msg, flush=True)
 
 
+
+def require_positive(label: str, stats: dict, proc) -> None:
+    """压测结果必须真的有数。
+
+    这条判据是补上的：loadgen 的 `-d` 只认 "8s" 而脚本传了 "8"，
+    命令直接报错退出，于是三轮都量到 0 RPS —— 而报告照样打印
+    "相对裸代理降幅 < 10%：达标（实测 0.0%）"。**一个不会失败的基准比没有基准更糟**，
+    所以这里一旦拿到 0 或解析不出，就立刻硬失败并打印原始输出。
+    """
+    rps = stats.get("rps") or 0
+    if rps <= 0:
+        print(f"\n[基准失败] {label} 量到 0 RPS —— 这组数字不可用。", file=sys.stderr)
+        print(f"loadgen 原始输出：\n{(proc.stdout or '').strip()[:800]}", file=sys.stderr)
+        if proc.stderr:
+            print(f"loadgen stderr：\n{proc.stderr.strip()[:800]}", file=sys.stderr)
+        sys.exit(2)
+    if stats.get("errors", 0) > 0 and rps > 0 and stats["errors"] > stats.get("requests", 0) * 0.01:
+        print(f"\n[基准存疑] {label} 错误率超过 1%（错误 {stats['errors']} / 请求 {stats.get('requests')}）",
+              file=sys.stderr)
+        sys.exit(2)
+
+
 def section(msg: str) -> None:
     print(f"\n=== {msg} ===", flush=True)
 
@@ -185,8 +207,16 @@ log:
   file: "./.tmp/bench/waf-{args.profile}.jsonl"
   app_output: file
   app_file: "./.tmp/bench/waf-app-{args.profile}.log"
+  # 压测请求不命中任何规则，access_mode: all 会把每条都写盘，
+  # 量到的就不再是 WAF 的吞吐而是磁盘的吞吐。
+  access_mode: hit
 engine:
   mode: detect
+# 压测要量的是**代理 + 检测**的开销，因此把限速关掉：
+# 压测机与被测机都是同一个来源 IP，限速一开就会把所有请求快速拒成 429，
+# 那时量到的是限速器的吞吐，不是 WAF 的吞吐（实测 43 万请求全被 429 拒掉）。
+ratelimit:
+  enabled: false
 """,
     )
 
@@ -223,7 +253,7 @@ engine:
         loadgen = str(dist / f"loadgen{EXE}")
         common = [
             "-c", str(args.concurrency),
-            "-d", args.duration,
+            "-d", f"{args.duration}s",
             "-bodysize", str(args.body_size),
         ]
 
@@ -234,6 +264,7 @@ engine:
         )
         base = parse_loadgen(base_proc.stdout)
         print(base_proc.stdout.strip())
+        require_positive("直连上游", base, base_proc)
 
         # 公平基线：同样的反向代理、同样的 Transport 调优，但不做任何检测。
         # 直连是一跳、WAF 是两跳，拿直连当基线量的是"多了一跳"，不是"WAF 慢"。
@@ -255,6 +286,7 @@ engine:
             cwd=ROOT, env=child_env, capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
         plain_stats = parse_loadgen(plain_proc.stdout)
+        require_positive("裸反向代理", plain_stats, plain_proc)
         print(plain_proc.stdout.strip())
 
         plain.terminate()
@@ -279,6 +311,7 @@ engine:
             cwd=ROOT, env=child_env, capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
         through = parse_loadgen(waf_proc.stdout)
+        require_positive("donothack", through, waf_proc)
         print(waf_proc.stdout.strip())
 
         mem = rss_mib(waf.pid) if waf.poll() is None else 0.0

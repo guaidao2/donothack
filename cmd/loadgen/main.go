@@ -17,6 +17,8 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -25,7 +27,7 @@ func main() {
 	var (
 		url        = flag.String("url", "http://127.0.0.1:8080/", "压测目标")
 		concur     = flag.Int("c", 32, "并发数")
-		duration   = flag.Duration("d", 10*time.Second, "持续时间")
+		duration   = durationFlag("d", 10*time.Second, "持续时间（可写 8 或 8s；裸数字按秒算）")
 		timeout    = flag.Duration("timeout", 10*time.Second, "单请求超时")
 		method     = flag.String("method", "GET", "请求方法")
 		bodyBytes  = flag.Int("bodysize", 0, "请求体大小（字节，0 表示无 body）")
@@ -210,4 +212,53 @@ func pct(sorted []time.Duration, p float64) time.Duration {
 func fatal(msg string) {
 	fmt.Fprintln(os.Stderr, "loadgen: "+msg)
 	os.Exit(1)
+}
+
+// durationFlag 让 `-d 8` 与 `-d 8s` 都能用。
+//
+// 为什么较真：脚本与手工命令都写过裸数字，而 flag.Duration 只认 "8s"。
+// 结果压测静默跑出 0 RPS —— **一个不会失败的基准比没有基准更糟**，
+// 所以这里既让它容错，也在 bench.py 侧加了"0 RPS 直接失败"的判据。
+func durationFlag(name string, def time.Duration, usage string) *time.Duration {
+	return durationValue(name, def, usage)
+}
+
+type durationVal struct{ v *time.Duration }
+
+func (d durationVal) String() string {
+	if d.v == nil {
+		return ""
+	}
+	return d.v.String()
+}
+
+func (d durationVal) Set(s string) error {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return fmt.Errorf("持续时间不能为空")
+	}
+	// 纯数字 → 按秒
+	if n, err := strconv.Atoi(s); err == nil {
+		if n <= 0 {
+			return fmt.Errorf("持续时间必须为正")
+		}
+		*d.v = time.Duration(n) * time.Second
+		return nil
+	}
+	parsed, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("无法解析持续时间 %q（示例：8 或 8s 或 500ms）", s)
+	}
+	if parsed <= 0 {
+		return fmt.Errorf("持续时间必须为正")
+	}
+	*d.v = parsed
+	return nil
+}
+
+func durationValue(name string, def time.Duration, usage string) *time.Duration {
+	v := new(time.Duration)
+	*v = def
+	flag.Var(durationVal{v: v}, name, usage)
+	return v
 }

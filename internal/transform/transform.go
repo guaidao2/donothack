@@ -120,6 +120,9 @@ func init() {
 	Register("none", func(in []byte, _ kv.Params) ([]byte, error) { return in, nil })
 
 	Register("lowercase", func(in []byte, _ kv.Params) ([]byte, error) {
+		if !hasUpperASCII(in) {
+			return in, nil
+		}
 		out := make([]byte, len(in))
 		for i, c := range in {
 			if c >= 'A' && c <= 'Z' {
@@ -131,6 +134,9 @@ func init() {
 	})
 
 	Register("uppercase", func(in []byte, _ kv.Params) ([]byte, error) {
+		if !hasLowerASCII(in) {
+			return in, nil
+		}
 		out := make([]byte, len(in))
 		for i, c := range in {
 			if c >= 'a' && c <= 'z' {
@@ -142,6 +148,9 @@ func init() {
 	})
 
 	Register("trim", func(in []byte, _ kv.Params) ([]byte, error) {
+		if isTrimmed(in) {
+			return in, nil
+		}
 		return bytes.TrimSpace(in), nil
 	})
 }
@@ -181,16 +190,25 @@ func unhex(c byte) (byte, bool) {
 
 func init() {
 	Register("urlDecode", func(in []byte, _ kv.Params) ([]byte, error) {
+		if !hasByte(in, '%') {
+			return in, nil
+		}
 		return urlDecodeOnce(in), nil
 	})
 
 	// 连续解码两次：对抗 %2527 这种"双写"绕过。
 	Register("doubleUrlDecode", func(in []byte, _ kv.Params) ([]byte, error) {
+		if !hasByte(in, '%') {
+			return in, nil
+		}
 		return urlDecodeOnce(urlDecodeOnce(in)), nil
 	})
 
 	// %u0041 形式（IIS/老式 unicode 编码）
 	Register("urlDecodeUni", func(in []byte, _ kv.Params) ([]byte, error) {
+		if !hasByte(in, '%') {
+			return in, nil
+		}
 		out := make([]byte, 0, len(in))
 		for i := 0; i < len(in); i++ {
 			if in[i] == '%' && i+5 < len(in) && (in[i+1] == 'u' || in[i+1] == 'U') {
@@ -218,6 +236,9 @@ func init() {
 	})
 
 	Register("base64Decode", func(in []byte, _ kv.Params) ([]byte, error) {
+		if !looksBase64ish(in) {
+			return in, nil
+		}
 		dst := make([]byte, base64.StdEncoding.DecodedLen(len(in)))
 		n, err := base64.StdEncoding.Decode(dst, in)
 		if err != nil {
@@ -228,6 +249,9 @@ func init() {
 	})
 
 	Register("base64DecodeExt", func(in []byte, _ kv.Params) ([]byte, error) {
+		if !looksBase64ish(in) {
+			return in, nil
+		}
 		s := strings.TrimRight(string(in), "=")
 		for _, enc := range []*base64.Encoding{base64.RawStdEncoding, base64.RawURLEncoding} {
 			dst := make([]byte, enc.DecodedLen(len(s)))
@@ -240,6 +264,9 @@ func init() {
 	})
 
 	Register("hexDecode", func(in []byte, _ kv.Params) ([]byte, error) {
+		if !isHexString(bytes.TrimSpace(in)) {
+			return in, nil
+		}
 		dst := make([]byte, hex.DecodedLen(len(in)))
 		n, err := hex.Decode(dst, bytes.TrimSpace(in))
 		if err != nil {
@@ -273,18 +300,30 @@ func init() {
 	})
 
 	Register("htmlEntityDecode", func(in []byte, _ kv.Params) ([]byte, error) {
+		if !hasByte(in, '&') {
+			return in, nil
+		}
 		return htmlEntityDecode(in), nil
 	})
 
 	Register("jsDecode", func(in []byte, _ kv.Params) ([]byte, error) {
+		if !hasByte(in, '\\') {
+			return in, nil
+		}
 		return jsDecode(in), nil
 	})
 
 	Register("cssDecode", func(in []byte, _ kv.Params) ([]byte, error) {
+		if !hasByte(in, '\\') {
+			return in, nil
+		}
 		return cssDecode(in), nil
 	})
 
 	Register("escapeSeqDecode", func(in []byte, _ kv.Params) ([]byte, error) {
+		if !hasByte(in, '\\') {
+			return in, nil
+		}
 		out := make([]byte, 0, len(in))
 		for i := 0; i < len(in); i++ {
 			if in[i] == '\\' && i+1 < len(in) {
@@ -454,18 +493,30 @@ func init() {
 	// crackweb 的"结构改写"里第一条就是注释分割（UN/**/ION），
 	// 所以这条变换是必挂的。
 	Register("removeComments", func(in []byte, _ kv.Params) ([]byte, error) {
+		if !hasCommentMarker(in) {
+			return in, nil
+		}
 		return replaceComments(in, nil), nil
 	})
 
 	Register("replaceComments", func(in []byte, _ kv.Params) ([]byte, error) {
+		if !hasCommentMarker(in) {
+			return in, nil
+		}
 		return replaceComments(in, []byte{' '}), nil
 	})
 
 	Register("removeNulls", func(in []byte, _ kv.Params) ([]byte, error) {
+		if !hasByte(in, 0) {
+			return in, nil
+		}
 		return bytes.ReplaceAll(in, []byte{0}, nil), nil
 	})
 
 	Register("compressWhitespace", func(in []byte, _ kv.Params) ([]byte, error) {
+		if !needsCompressWhitespace(in) {
+			return in, nil
+		}
 		out := make([]byte, 0, len(in))
 		prevWS := false
 		for _, c := range in {
@@ -485,6 +536,9 @@ func init() {
 	})
 
 	Register("removeWhitespace", func(in []byte, _ kv.Params) ([]byte, error) {
+		if !anyByte(in, " \t\n\r\v\f") {
+			return in, nil
+		}
 		out := make([]byte, 0, len(in))
 		for _, c := range in {
 			switch c {

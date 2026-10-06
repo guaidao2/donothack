@@ -1,8 +1,9 @@
 package rules
 
 import (
+	"strconv"
+
 	"donothack/internal/kv"
-	"donothack/internal/operator"
 	"donothack/internal/tx"
 )
 
@@ -98,38 +99,161 @@ func (rs *RuleSet) evalChain(t *tx.Transaction, head *CompiledRule, sc *EvalScra
 
 // evalRuleSingle 展开 target，逐值跑变换链 + 算子。
 func (rs *RuleSet) evalRuleSingle(t *tx.Transaction, r *CompiledRule, sc *EvalScratch) (Hit, bool) {
+	// 上下文复用：这里不给每个规则求值新建对象（见 EvalScratch.ctx 的注释）。
+	sc.ctx.TxID = t.ID
+	sc.ctx.RuleID = r.ID
+	sc.ctx.Phase = r.Phase
+
 	for _, plan := range r.Targets {
-		matched := false
-		var hit Hit
-		expandCollection(&t.Vars, plan.Collection, func(key string, val []byte) bool {
-			if !targetMatches(plan, key) {
-				return true
+		// 直接迭代而不是传回调：回调闭包会捕获局部变量并逃逸到堆上，
+		// 每条规则每个目标一次分配 —— 在"零分配"的门禁下这是致命的。
+		ps, isParams := paramsOf(&t.Vars, plan.Collection)
+		if isParams {
+			for i := 0; i < ps.Len(); i++ {
+				key := ps.KeyAt(i)
+				if !targetMatches(plan, string(key)) {
+					continue
+				}
+				val := ps.ValueAt(i)
+				out := applyChain(r.Transforms, sc, val)
+				res, err := r.Op.Eval(&sc.ctx, out)
+				if err != nil || !res.Matched {
+					continue
+				}
+				return Hit{
+					Rule:    r,
+					Target:  TargetLabel(plan.Collection, string(key)),
+					Detail:  res.Detail,
+					Matched: len(out),
+					Before:  val,
+					After:   out,
+				}, true
 			}
-			out := applyChain(r.Transforms, sc, val)
-			res, err := r.Op.Eval(&operator.EvalCtx{
-				TxID:   t.ID,
-				RuleID: r.ID,
-				Phase:  r.Phase,
-			}, out)
-			if err != nil || !res.Matched {
-				return true
-			}
-			hit = Hit{
-				Rule:    r,
-				Target:  TargetLabel(plan.Collection, key),
-				Detail:  res.Detail,
-				Matched: len(out),
-				Before:  val,
-				After:   out,
-			}
-			matched = true
-			return false
-		})
-		if matched {
+			continue
+		}
+		// 标量集合（URI / 方法 / 地址…）：逐个显式取值，同样不引入闭包。
+		if hit, ok := rs.evalScalar(t, r, plan, sc); ok {
 			return hit, true
 		}
 	}
 	return Hit{}, false
+}
+
+// evalScalar 处理不是 tx.Params 的集合。
+func (rs *RuleSet) evalScalar(t *tx.Transaction, r *CompiledRule, plan VarPlan, sc *EvalScratch) (Hit, bool) {
+	try := func(key string, val []byte) (Hit, bool) {
+		if !targetMatches(plan, key) {
+			return Hit{}, false
+		}
+		out := applyChain(r.Transforms, sc, val)
+		res, err := r.Op.Eval(&sc.ctx, out)
+		if err != nil || !res.Matched {
+			return Hit{}, false
+		}
+		return Hit{
+			Rule:    r,
+			Target:  TargetLabel(plan.Collection, key),
+			Detail:  res.Detail,
+			Matched: len(out),
+			Before:  val,
+			After:   out,
+		}, true
+	}
+
+	switch plan.Collection {
+	case "REQUEST_URI":
+		return try("", []byte(t.Vars.URI))
+	case "REQUEST_PATH":
+		// 双形态：原始路径与规范化路径都要过检测。
+		if t.Vars.RawPath != "" {
+			if h, ok := try("(raw)", []byte(t.Vars.RawPath)); ok {
+				return h, true
+			}
+		}
+		return try("", []byte(t.Vars.Path))
+	case "REQUEST_METHOD":
+		return try("", []byte(t.Vars.Method))
+	case "REQUEST_PROTOCOL":
+		return try("", []byte(t.Vars.Proto))
+	case "REQUEST_BODY":
+		if t.Vars.Body == nil {
+			return Hit{}, false
+		}
+		return try("", t.Vars.Body)
+	case "REMOTE_ADDR":
+		return try("", []byte(t.Vars.RawIP))
+	case "ARGS_COUNT":
+		return try("", []byte(strconv.Itoa(t.Vars.Args.Len())))
+	case "REQUEST_URI_LENGTH":
+		return try("", []byte(strconv.Itoa(len(t.Vars.URI))))
+	case "REQUEST_BODY_LENGTH":
+		return try("", []byte(strconv.Itoa(len(t.Vars.Body))))
+	case "FILES":
+		for _, metas := range t.Vars.Files {
+			for i := range metas {
+				if h, ok := try(metas[i].FieldName, []byte(metas[i].FileName)); ok {
+					return h, true
+				}
+			}
+		}
+	case "FILES_NAMES":
+		for name := range t.Vars.Files {
+			if h, ok := try(name, []byte(name)); ok {
+				return h, true
+			}
+		}
+	case "FILES_SIZES":
+		for _, metas := range t.Vars.Files {
+			for i := range metas {
+				if h, ok := try(metas[i].FieldName, []byte(strconv.FormatInt(metas[i].Size, 10))); ok {
+					return h, true
+				}
+			}
+		}
+	case "FILES_MAGIC":
+		for _, metas := range t.Vars.Files {
+			for i := range metas {
+				m := metas[i]
+				if m.MagicLen == 0 {
+					continue
+				}
+				if h, ok := try(m.FieldName, m.Magic[:m.MagicLen]); ok {
+					return h, true
+				}
+			}
+		}
+	}
+	return Hit{}, false
+}
+
+// paramsOf 返回集合对应的 tx.Params（不是参数类集合时返回 false）。
+//
+// 有了它，规则求值可以**直接按下标迭代**而不必传回调闭包 ——
+// 闭包会让捕获的局部变量逃逸，每条规则一次分配。
+func paramsOf(v *tx.Collections, collection string) (*tx.Params, bool) {
+	switch collection {
+	case "ARGS":
+		return &v.Args, true
+	case "ARGS_GET":
+		return &v.ArgsGet, true
+	case "ARGS_POST":
+		return &v.ArgsPost, true
+	case "ARGS_JSON":
+		return &v.ArgsJSON, true
+	case "ARGS_XML":
+		return &v.ArgsXML, true
+	case "ARGS_NAMES":
+		return &v.Args, true
+	case "REQUEST_HEADERS":
+		return &v.Headers, true
+	case "REQUEST_HEADERS_NAMES":
+		return &v.Headers, true
+	case "REQUEST_COOKIES":
+		return &v.Cookies, true
+	case "REQUEST_COOKIES_NAMES":
+		return &v.Cookies, true
+	}
+	return nil, false
 }
 
 // applyChain 依次执行变换链。任一变换失败就跳过该变换（用上一步的结果继续），

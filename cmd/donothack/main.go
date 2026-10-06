@@ -341,6 +341,20 @@ func run(cfgPath string, checkOnly, printBudget, noRules bool) error {
 		Next:          dataplane,
 		Version:       version.Version,
 		Ruleset:       rulesetSummary(ruleSet),
+		DegradeInfoFn: func() *server.DegradeInfo {
+			ds := degrader.Stats()
+			return &server.DegradeInfo{
+				Level:        ds.Level,
+				LevelNum:     ds.LevelNum,
+				Reason:       ds.Reason,
+				HeapRatio:    ds.HeapRatio,
+				GCCPUFrac:    ds.GCCPUFrac,
+				Inflight:     ds.Inflight,
+				RejectsRate:  ds.RejectsRate,
+				ShouldReject: ds.ShouldReject,
+				Transitions:  ds.Transitions,
+			}
+		},
 	})
 	// ---- 控制台（独立端口、独立 mux、不进检测引擎）----
 	if cfg.Admin.Enabled {

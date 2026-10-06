@@ -23,6 +23,22 @@ import (
 )
 
 // Options 是数据面服务器的构造参数。
+// DegradeInfo 是过载降级状态。
+//
+// 设计里承诺"降级必须三处可见（日志 / 指标 / readyz）"，这一项之前是缺的 ——
+// 压测时出现"全部非 2xx"就是因为降级到 L4 后返回 503，而没有这一项时只能靠猜。
+type DegradeInfo struct {
+	Level        string  `json:"level"`
+	LevelNum     int     `json:"level_num"`
+	Reason       string  `json:"reason"`
+	HeapRatio    float64 `json:"heap_ratio"`
+	GCCPUFrac    float64 `json:"gc_cpu_fraction"`
+	Inflight     int     `json:"inflight"`
+	RejectsRate  float64 `json:"rejects_per_sec"`
+	ShouldReject bool    `json:"should_reject"`
+	Transitions  uint64  `json:"transitions"`
+}
+
 type Options struct {
 	Config        *config.Config
 	Profile       profile.Params
@@ -36,6 +52,9 @@ type Options struct {
 	Version       string
 	// Ruleset 是规则集摘要（版本、条数），进 /readyz，方便确认"到底加载了哪些规则"。
 	Ruleset string
+
+	// DegradeInfoFn 返回当前降级状态（由 main 注入，避免 server 依赖 degrade 包）。
+	DegradeInfoFn func() *DegradeInfo
 }
 
 // Server 是数据面服务器。
@@ -247,6 +266,11 @@ type ReadyInfo struct {
 	Ruleset         string  `json:"ruleset"`
 	UptimeSeconds   float64 `json:"uptime_seconds"`
 
+	// Degrade 是过载降级状态。设计里承诺"降级必须三处可见（日志/指标//readyz）"，
+	// 这一项之前是缺的 —— 压测时出现"全部非 2xx"就是因为降级到 L4 返回 503，
+	// 而没有这一项时只能靠猜。
+	Degrade *DegradeInfo `json:"degrade,omitempty"`
+
 	// 日志侧的事实：丢弃、轮转、删除都必须能被看到。
 	// 否则出问题时只剩下"日志怎么少了一段"这种无法解释的现象。
 	Log *audit.Stats `json:"log,omitempty"`
@@ -294,7 +318,20 @@ func (s *Server) buildReadyInfo(ok bool, detail string) ReadyInfo {
 		RejectedTotal:   s.rejected.Load(),
 		Ruleset:         s.o.Ruleset,
 		UptimeSeconds:   round2(time.Since(s.startedAt).Seconds()),
+		Degrade:         s.degradeInfo(),
+		Log:             s.logStats(),
 	}
+}
+
+// logStats 返回日志侧的事实（丢弃/轮转/删除/跳过压缩）。
+//
+// 这些计数必须在 /readyz 可见，否则出问题时只剩"日志怎么少了一段"这种无法解释的现象。
+func (s *Server) logStats() *audit.Stats {
+	if s.o.Logger == nil {
+		return nil
+	}
+	st := s.o.Logger.Stats()
+	return &st
 }
 
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
@@ -447,4 +484,12 @@ func (p *upstreamProbe) resolve(ctx context.Context) (bool, string) {
 		return false, fmt.Sprintf("上游 DNS 解析失败：%v", err)
 	}
 	return true, fmt.Sprintf("上游 DNS 解析到 %v", addrs)
+}
+
+// degradeInfo 返回降级状态（未注入回调时为 nil）。
+func (s *Server) degradeInfo() *DegradeInfo {
+	if s.o.DegradeInfoFn == nil {
+		return nil
+	}
+	return s.o.DegradeInfoFn()
 }

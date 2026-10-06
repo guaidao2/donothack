@@ -86,6 +86,7 @@ type Pipeline struct {
 	ipDenied     atomic.Uint64
 	ipAllowed    atomic.Uint64
 	hostRejected atomic.Uint64
+	bypassed     atomic.Uint64
 }
 
 // Stats 是数据面统计。
@@ -98,6 +99,7 @@ type Stats struct {
 	IPDenied     uint64
 	IPAllowed    uint64
 	HostRejected uint64
+	Bypassed     uint64
 }
 
 // Stats 返回统计快照。
@@ -111,6 +113,7 @@ func (p *Pipeline) Stats() Stats {
 		IPDenied:     p.ipDenied.Load(),
 		IPAllowed:    p.ipAllowed.Load(),
 		HostRejected: p.hostRejected.Load(),
+		Bypassed:     p.bypassed.Load(),
 	}
 }
 
@@ -320,6 +323,19 @@ func (p *Pipeline) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				r, txIDFrom(rec), category, "", ipRes.IP, status, retry), true)
 			return
 		}
+	}
+
+	// ---- 3.5) detect 模式的 L4：旁路（跳过检测，只转发）----
+	// 注意语义：detect 模式本来就只记录、不拦截，"降级"对它意味着"少做点检测"，
+	// 而不是"拒绝服务"。所以这里直接转发，而不是返回 503。
+	if p.o.Degrader != nil && p.o.Degrader.Bypass() {
+		p.bypassed.Add(1)
+		if rec != nil {
+			rec.Verdict = "bypass"
+			rec.Reason = "detect 模式 L4：跳过检测直接转发"
+		}
+		p.forward(w, r)
+		return
 	}
 
 	// ---- 4) 检测 ----
