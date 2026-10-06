@@ -332,3 +332,29 @@ P0 完成。下一步 P1（解析层：路径规范化、解码链、参数提�
 4. `scripts/bench.py` × `loadgen`：`-d 8` 传给只认 `8s` 的参数，
    三轮全量到 0 RPS 却仍打印"达标"。现在 loadgen 接受裸秒数，
    bench.py 拿到 0 RPS **立刻硬失败**。
+
+## [2026-10-06] P4 收尾：告警通道、TOTP 两步验证、门槛路径轮换（tag `v0.9.0-ops-complete`）
+
+### 新增
+- `internal/notify`：webhook 告警通道。**永不阻塞数据面**（独立 goroutine + 有界队列，
+  满即丢并计数）、**必须限流**（同类告警冷却 + 合并计数）、**不发 payload 原文**
+  （告警常被转到 IM/邮件/工单，那里访问控制比 WAF 弱）。
+  端点：`GET/PUT /notify`、`POST /notify/test`；拦截与限速都会触发告警。
+- TOTP 两步验证（`internal/console/totp.go`，自实现 RFC 6238，不引第三方库）：
+  `POST /totp/enroll`（带 code 才激活）、`POST /totp/disable`（用账号口令，
+  作为"认证器丢了"的恢复路径）。登录在**口令校验通过之后**才要验证码。
+- `POST /gate/path/rotate`：生成新的挂载路径 token（刻意不做热改，见下）。
+- `scripts/verify_notify_totp.py`：端到端验证脚本（真起服务 + 假 webhook 接收端）。
+
+### 修复
+- **TOTP enroll 语义错误**：带验证码再次调用时又生成了新密钥，等于"拿新密钥校验旧验证码"
+  —— **永远无法激活**。改成用上一次暂存的那把密钥校验。（端到端脚本抓到的。）
+- `/totp/enroll` 不带验证码时**不再直接激活**：认证器里填错一位就会把管理员锁在外面。
+- `/notify` 的回显对 webhook 路径做遮罩（IM 机器人的 token 就在路径里）。
+- 验证脚本增加"等端口就绪 + 控制台自检"：上一轮进程退出后 Windows 释放端口需要时间，
+  紧接着再起会 bind 失败，表现为 ConnectionReset（看着像服务 bug，其实是脚本没等）。
+
+### 端到端验证（`python scripts/verify_notify_totp.py`）
+20 项断言全通过：告警送达、拦截触发告警、告警不含 payload、冷却合并、
+webhook 挂掉不影响数据面、TOTP 全流程（未校验不激活 / 错误码拒绝 / 正确码激活 /
+启用后登录必须带码 / 口令可解绑）。

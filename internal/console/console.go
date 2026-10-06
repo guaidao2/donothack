@@ -30,6 +30,7 @@ import (
 	"donothack/internal/config"
 	"donothack/internal/control"
 	"donothack/internal/eventstore"
+	"donothack/internal/notify"
 	"donothack/internal/ratelimit"
 	"donothack/internal/realip"
 
@@ -46,6 +47,11 @@ type Options struct {
 	Logger   *audit.Logger
 	Version  string
 
+	// Notifier 是告警通道（GET/PUT /notify 会读改它）。
+	Notifier *notify.Notifier
+	// ApplyNotifier 把新的发送器推给数据面（改完 webhook 要立刻生效）。
+	ApplyNotifier func(*notify.Notifier)
+
 	// EventSummary 提供数据面侧的统计（拦截数、限速数、降级档位）。
 	EventSummary func() map[string]any
 	// ReadyInfo 提供 /readyz 风格的就绪信息。
@@ -59,6 +65,8 @@ type Server struct {
 	mux     *http.ServeMux
 	gate    *gateState
 	login   *gateState
+	totp    *gateState // TOTP 密钥（与 gateState 同构：读写加锁）
+	totpOn  atomic.Bool
 	assets  fs.FS
 	mount   string // 挂载前缀（gate.path_token 生效时非空）
 	session *sessionStore
@@ -117,6 +125,14 @@ func New(o Options) (*Server, string, error) {
 		initial = pw
 	}
 	s.login = &gateState{passwordHash: loginHash}
+
+	// TOTP：配置里带密钥且开关打开才算启用。
+	// 只开开关不给密钥是**有意**判定为"未启用"的 —— 否则每个实例重启后
+	// 都拿着一把自己生成的密钥，而运维的认证器里那把就成了废码。
+	s.totp = &gateState{passwordHash: o.Config.Admin.TOTPSecret}
+	if o.Config.Admin.TOTPEnabled && strings.TrimSpace(o.Config.Admin.TOTPSecret) != "" {
+		s.totpOn.Store(true)
+	}
 
 	// 门槛凭据是**另一套**（可以单独轮换、可以交给运维同事）。
 	// 首次运行时若没配门槛凭据，就用同一个初始密码再哈希一次 ——
@@ -223,6 +239,7 @@ func (s *Server) routes() {
 	h("/api/v1/gate", s.handleGate)
 	h("/api/v1/gate/rotate", s.handleGateRotate)
 	h("/api/v1/gate/cert/selfsigned", s.handleGateCertSelfSigned)
+	h("/api/v1/gate/path/rotate", s.handleGatePathRotate)
 
 	// 例外与 IP 名单
 	h("/api/v1/exceptions", s.handleExceptions)
@@ -235,6 +252,12 @@ func (s *Server) routes() {
 	h("/api/v1/restore", s.handleRestore)
 
 	// 配置与审计
+	h("/api/v1/totp/enroll", s.handleTOTPEnroll)
+	h("/api/v1/totp/disable", s.handleTOTPDisable)
+
+	h("/api/v1/notify", s.handleNotify)
+	h("/api/v1/notify/test", s.handleNotifyTest)
+
 	h("/api/v1/config", s.handleConfig)
 	h("/api/v1/config/diff", s.handleConfigDiff)
 	h("/api/v1/config/reload", s.handleConfigReload)
@@ -599,4 +622,9 @@ func localIP() net.IP {
 		}
 	}
 	return nil
+}
+
+// totpEnabled 报告 TOTP 是否真正生效（开关打开 **且** 有密钥）。
+func (s *Server) totpEnabled() bool {
+	return s.totpOn.Load() && strings.TrimSpace(s.totp.get()) != ""
 }

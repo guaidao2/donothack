@@ -380,22 +380,25 @@ type EventsConfig struct {
 
 // AdminConfig 是控制台与控制面 API 配置。
 type AdminConfig struct {
-	Enabled            bool             `yaml:"enabled"`
-	Addr               string           `yaml:"addr"`
-	Gate               GateConfig       `yaml:"gate"`
-	TLS                ConsoleTLSConfig `yaml:"tls"`
-	AuthMode           string           `yaml:"auth_mode"` // session | session+basic
-	Username           string           `yaml:"username"`
-	PasswordHash       string           `yaml:"password_hash"`
-	APIToken           string           `yaml:"api_token"`
-	TOTPEnabled        bool             `yaml:"totp_enabled"`
-	AllowIPs           []string         `yaml:"allow_ips"`
-	AllowInsecure      bool             `yaml:"allow_insecure"`
-	SessionIdleTimeout Duration         `yaml:"session_idle_timeout"`
-	MaxLoginFails      int              `yaml:"max_login_fails"`
-	Lockout            Duration         `yaml:"lockout"`
-	Pprof              bool             `yaml:"pprof"`
-	Events             EventsConfig     `yaml:"events"`
+	Enabled      bool             `yaml:"enabled"`
+	Addr         string           `yaml:"addr"`
+	Gate         GateConfig       `yaml:"gate"`
+	TLS          ConsoleTLSConfig `yaml:"tls"`
+	AuthMode     string           `yaml:"auth_mode"` // session | session+basic
+	Username     string           `yaml:"username"`
+	PasswordHash string           `yaml:"password_hash"`
+	APIToken     string           `yaml:"api_token"`
+	TOTPEnabled  bool             `yaml:"totp_enabled"`
+	// TOTPSecret 是 base32 密钥。**必须由运维自己保存**：只写在配置里，
+	// 服务端不生成、不落盘到别处 —— 换机器/重启后仍然能对上。
+	TOTPSecret         string       `yaml:"totp_secret"`
+	AllowIPs           []string     `yaml:"allow_ips"`
+	AllowInsecure      bool         `yaml:"allow_insecure"`
+	SessionIdleTimeout Duration     `yaml:"session_idle_timeout"`
+	MaxLoginFails      int          `yaml:"max_login_fails"`
+	Lockout            Duration     `yaml:"lockout"`
+	Pprof              bool         `yaml:"pprof"`
+	Events             EventsConfig `yaml:"events"`
 }
 
 // AlertConfig 是告警钩子配置（P4 实现）。

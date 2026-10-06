@@ -32,6 +32,7 @@ import (
 	"donothack/internal/degrade"
 	"donothack/internal/engine"
 	"donothack/internal/eventstore"
+	"donothack/internal/notify"
 	"donothack/internal/parser"
 	"donothack/internal/pipeline"
 	"donothack/internal/profile"
@@ -270,6 +271,17 @@ func run(cfgPath string, checkOnly, printBudget, noRules bool) error {
 		})
 	}
 
+	// ---- 告警通道 ----
+	notifier := notify.New(notify.Options{
+		Enabled:  cfg.Alert.Enabled,
+		Webhook:  cfg.Alert.Webhook,
+		Instance: cfg.Upstream.URL,
+	})
+	defer notifier.Close()
+	if notifier.Enabled() {
+		log.Info("告警通道已启用", "webhook", cfg.Alert.Webhook)
+	}
+
 	var dataplane http.Handler = fwd
 	var pl *pipeline.Pipeline
 	if !noRules {
@@ -285,6 +297,7 @@ func run(cfgPath string, checkOnly, printBudget, noRules bool) error {
 			BanOnBlock:       cfg.Engine.BanOnBlock,
 			BlockBanDuration: cfg.Engine.BlockBanDuration.D(),
 			Events:           events,
+			Notifier:         notifier,
 			AllowedHosts: func(host string) bool {
 				return cfg.Upstream.HostAllowed(host)
 			},
@@ -369,6 +382,12 @@ func run(cfgPath string, checkOnly, printBudget, noRules bool) error {
 			Resolver: resolver,
 			Logger:   logger,
 			Version:  version.Version,
+			Notifier: notifier,
+			ApplyNotifier: func(n *notify.Notifier) {
+				if pl != nil {
+					pl.SetNotifier(n)
+				}
+			},
 			// 控制台的 /status 与数据面的 /readyz 共用同一份就绪事实，
 			// 避免两边各算一遍后出现"控制台说 A、readyz 说 B"。
 			ReadyInfo: srv.ReadyMap,

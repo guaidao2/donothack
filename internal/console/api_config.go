@@ -1,10 +1,14 @@
 package console
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"sort"
 	"strings"
+	"time"
+
+	"donothack/internal/notify"
 
 	"gopkg.in/yaml.v3"
 
@@ -325,3 +329,133 @@ func sameBlockPage(a, b *config.Config) bool {
 }
 
 func boolPtr(v bool) *bool { return &v }
+
+// ---------------------------------------------------------------- 告警通道
+
+// handleNotify 读取或更新告警通道配置。
+//
+// 与配置文件的取舍：`alert.webhook` 改在内存里立即生效；要持久化请改配置文件后
+// 用 POST /config/reload。**不回显 webhook 里的凭据**（很多 IM 机器人 URL 里带 token）。
+func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !s.requireRead(w, r) {
+			return
+		}
+		out := map[string]any{
+			"enabled":            s.o.Config.Alert.Enabled,
+			"webhook":            redactWebhook(s.o.Config.Alert.Webhook),
+			"webhook_configured": s.o.Config.Alert.Webhook != "",
+		}
+		if s.o.Notifier != nil {
+			out["stats"] = s.o.Notifier.Stats()
+		}
+		writeJSON(w, http.StatusOK, out)
+
+	case http.MethodPut:
+		if !s.requireWrite(w, r) {
+			return
+		}
+		var req struct {
+			Enabled *bool   `json:"enabled"`
+			Webhook *string `json:"webhook"`
+		}
+		if err := decodeJSON(r, &req); err != nil {
+			s.writeError(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON", err.Error())
+			return
+		}
+		var warnings []string
+		if req.Enabled != nil {
+			s.o.Config.Alert.Enabled = *req.Enabled
+		}
+		if req.Webhook != nil {
+			wh := strings.TrimSpace(*req.Webhook)
+			if wh != "" && !strings.HasPrefix(wh, "http://") && !strings.HasPrefix(wh, "https://") {
+				s.writeError(w, http.StatusUnprocessableEntity, "invalid_webhook",
+					"webhook 必须以 http:// 或 https:// 开头", "")
+				return
+			}
+			s.o.Config.Alert.Webhook = wh
+		}
+		// 重新构造发送器（旧的需要停掉，避免 goroutine 泄漏）
+		if s.o.Notifier != nil {
+			s.o.Notifier.Close()
+		}
+		s.o.Notifier = notify.New(notify.Options{
+			Enabled:  s.o.Config.Alert.Enabled,
+			Webhook:  s.o.Config.Alert.Webhook,
+			Instance: s.o.Config.Upstream.URL,
+		})
+		// 数据面也要换（否则拦截时的告警还打到旧地址）
+		if s.o.ApplyNotifier != nil {
+			s.o.ApplyNotifier(s.o.Notifier)
+		}
+		sess, _ := s.currentSession(r)
+		recordAuth(authEvent{Actor: actorOf(sess, r), Action: "notify_set", OK: true, Remote: s.clientIP(r)})
+		warnings = append(warnings, "已生效（本次运行）；要持久化请改配置文件里的 alert 段后执行 POST /config/reload")
+		if s.o.Config.Alert.Enabled && s.o.Config.Alert.Webhook == "" {
+			warnings = append(warnings, "已启用但没配 webhook，实际不会发送任何告警")
+		}
+		writeJSON(w, http.StatusOK, okResponse{OK: true, SnapshotVersion: s.snapshotVersion(), Warnings: warnings})
+
+	default:
+		s.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "只支持 GET / PUT", "")
+	}
+}
+
+// handleNotifyTest 往 webhook 发一条测试告警（同步，直接回结果）。
+func (s *Server) handleNotifyTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "必须用 POST", "")
+		return
+	}
+	if !s.requireWrite(w, r) {
+		return
+	}
+	if s.o.Notifier == nil || !s.o.Notifier.Enabled() {
+		s.writeError(w, http.StatusPreconditionFailed, "notify_disabled",
+			"告警未启用或未配置 webhook", "先 PUT /notify 配好再测")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+	err := s.o.Notifier.Send(ctx, notify.Event{
+		Kind:     "test",
+		At:       time.Now(),
+		Severity: "info",
+		Detail:   "这是一条来自 donothack 控制台的测试告警",
+		TxID:     "console-test",
+		Verdict:  "test",
+	})
+	sess, _ := s.currentSession(r)
+	if err != nil {
+		recordAuth(authEvent{Actor: actorOf(sess, r), Action: "notify_test", OK: false,
+			Remote: s.clientIP(r), Detail: err.Error()})
+		s.writeError(w, http.StatusBadGateway, "webhook_failed", "测试告警发送失败", err.Error())
+		return
+	}
+	recordAuth(authEvent{Actor: actorOf(sess, r), Action: "notify_test", OK: true, Remote: s.clientIP(r)})
+	writeJSON(w, http.StatusOK, okResponse{OK: true, Warnings: []string{"测试告警已送达 webhook"}})
+}
+
+// redactWebhook 只回显 host 与 path 的前缀，不回显完整 URL。
+//
+// 很多 IM 机器人的 webhook URL 里直接带着 token，回显等于把它交给浏览器。
+func redactWebhook(u string) string {
+	u = strings.TrimSpace(u)
+	if u == "" {
+		return ""
+	}
+	if i := strings.Index(u, "://"); i >= 0 {
+		rest := u[i+3:]
+		if j := strings.IndexByte(rest, '/'); j >= 0 {
+			host := rest[:j]
+			path := rest[j:]
+			if len(path) > 12 {
+				path = path[:12] + "…"
+			}
+			return u[:i+3] + host + path
+		}
+	}
+	return "（已配置）"
+}

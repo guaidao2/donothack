@@ -213,3 +213,203 @@ func (s *Server) handleGateCertSelfSigned(w http.ResponseWriter, r *http.Request
 			"要固定证书请配置 admin.tls.cert_file / key_file。",
 	})
 }
+
+// ---------------------------------------------------------------- TOTP
+
+// handleTOTPEnroll 生成（或重新生成）TOTP 密钥。
+//
+// 语义取舍：**带 code 就校验后激活，不带就"先生成、暂不激活"**。
+// 为什么不直接激活：认证器里填错一位就会把管理员锁在外面 ——
+// 而"锁在外面"这种故障，代价远高于"少点一次确认"。
+// 前端目前只调不带 code 的形式，因此状态会显示"未启用（待确认）"，这是**如实**的。
+func (s *Server) handleTOTPEnroll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "必须用 POST", "")
+		return
+	}
+	if !s.requireWrite(w, r) {
+		return
+	}
+	var req struct {
+		Code string `json:"code"`
+	}
+	// 允许空体：前端就是空对象调用
+	if r.ContentLength > 0 {
+		if err := decodeJSON(r, &req); err != nil {
+			s.writeError(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON", err.Error())
+			return
+		}
+	}
+
+	issuer := "donothack"
+	account := s.o.Config.Admin.Username
+	if account == "" {
+		account = "admin"
+	}
+	sess, _ := s.currentSession(r)
+
+	// ---- 带验证码 = 确认激活 ----
+	//
+	// **必须用"上一次生成并暂存的那把密钥"来校验**，不能在这里再生成一把：
+	// 客户端手里的验证码来自上一次 enroll 返回的密钥，若这里重新生成，
+	// 就变成"拿新密钥校验旧验证码" —— 结果是**永远激活不了**。
+	// （这是真踩到的：端到端脚本连着调两次，第二次必然 422。）
+	if code := strings.TrimSpace(req.Code); code != "" {
+		pending := strings.TrimSpace(s.totp.get())
+		if pending == "" {
+			s.writeError(w, http.StatusPreconditionFailed, "no_pending_secret",
+				"还没有待确认的密钥", "请先不带 code 调用一次本接口生成密钥")
+			return
+		}
+		if !verifyTOTP(pending, code, time.Now()) {
+			recordAuth(authEvent{Actor: actorOf(sess, r), Action: "totp_enroll", OK: false,
+				Remote: s.clientIP(r), Detail: "验证码校验失败"})
+			s.writeError(w, http.StatusUnprocessableEntity, "invalid_totp",
+				"验证码不对：请确认认证器已加入该密钥、且手机时间与服务器一致",
+				"密钥**仍未启用**；要换一把密钥请不带 code 重新调用")
+			return
+		}
+		s.totpOn.Store(true)
+		recordAuth(authEvent{Actor: actorOf(sess, r), Action: "totp_enroll", OK: true,
+			Remote: s.clientIP(r), Detail: "已校验并启用"})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":           true,
+			"totp_enabled": true,
+			"otpauth_url":  totpURI(issuer, account, pending),
+			"warnings": []string{
+				"已启用（本次运行）。要持久化请把密钥写入配置的 admin.totp_secret，并把 admin.totp_enabled 设为 true；否则重启后会回到未启用。",
+			},
+		})
+		return
+	}
+
+	// ---- 不带验证码 = 生成（或重生）密钥，暂不激活 ----
+	secret, err := generateTOTPSecret()
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "generate_failed", "生成密钥失败", err.Error())
+		return
+	}
+	s.totp.set(secret)
+	s.totpOn.Store(false)
+	recordAuth(authEvent{Actor: actorOf(sess, r), Action: "totp_enroll", OK: true,
+		Remote: s.clientIP(r), Detail: "已生成密钥，待校验"})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"secret":       secret,
+		"otpauth_url":  totpURI(issuer, account, secret),
+		"totp_enabled": false,
+		"pending":      true,
+		// 前端目前只有"绑定/重绑"一个按钮、不会回传验证码，
+		// 所以这里必须把"怎么真正启用"讲清楚，而不是让它看起来已经生效。
+		"next_step": "把密钥填进认证器 App，然后带认证器当前验证码再调用一次本接口" +
+			"（{\"code\": \"123456\"}）即可启用；或直接把密钥写进配置的 admin.totp_secret 并重启。",
+		"warnings": []string{"密钥已生成但**尚未启用** —— 未校验过验证码就激活，填错一位就会把管理员锁在外面。"},
+	})
+}
+
+// handleTOTPDisable 解绑 TOTP。
+//
+// 需要**账号口令**而不是会话：管理员最需要它的场合恰恰是"认证器丢了、进不去"，
+// 那时候没有会话可用。它与登录共用同一套失败封禁，避免变成口令爆破入口。
+func (s *Server) handleTOTPDisable(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "必须用 POST", "")
+		return
+	}
+	var req loginRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON", err.Error())
+		return
+	}
+	ip := s.clientIP(r)
+	wantUser := s.o.Config.Admin.Username
+	if strings.TrimSpace(wantUser) == "" {
+		wantUser = "admin"
+	}
+	if !subtleEqual(req.Username, wantUser) || !verifyPassword(s.login.get(), req.Password) {
+		s.loginFails.Add(1)
+		if s.o.Limiter != nil {
+			if banned, until := s.o.Limiter.Penalize("console:" + ip); banned {
+				recordAuth(authEvent{Actor: req.Username, Action: "totp_disable", OK: false,
+					Remote: ip, Detail: fmt.Sprintf("失败过多，封禁至 %s", until.Format(time.RFC3339))})
+				s.writeError(w, http.StatusTooManyRequests, "locked_out", "尝试次数过多，已临时封禁", "")
+				return
+			}
+		}
+		recordAuth(authEvent{Actor: req.Username, Action: "totp_disable", OK: false, Remote: ip})
+		s.writeError(w, http.StatusUnauthorized, "invalid_credentials", "用户名或口令不对", "")
+		return
+	}
+	s.totp.set("")
+	s.totpOn.Store(false)
+	recordAuth(authEvent{Actor: req.Username, Action: "totp_disable", OK: true, Remote: ip})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "totp_enabled": false,
+		"warnings": []string{"已解绑（本次运行）。如果配置里还写着 admin.totp_enabled: true，请一并改掉，否则下次重启又会要求两步验证。"},
+	})
+}
+
+// handleGatePathRotate 生成一个新的控制台挂载路径 token。
+//
+// **刻意不做"运行时热改"**：挂载路径在启动时就被烘进了三个地方 ——
+// mux 的路由、静态资源的服务前缀、以及注入到 SPA 里的 <base href>。
+// 运行时换路径意味着要在服务过程中搬走一个正在被浏览器使用的挂载点，
+// 结果多半是"管理员自己把自己踢出控制台"。
+// 所以这里只做**生成**（这本来是最容易写错的一步：随机性要够），
+// 然后明确告诉运维改哪里、要重启。
+func (s *Server) handleGatePathRotate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "必须用 POST", "")
+		return
+	}
+	if !s.requireWrite(w, r) {
+		return
+	}
+	if !s.o.Config.Admin.Gate.Enabled {
+		s.writeError(w, http.StatusPreconditionFailed, "gate_disabled",
+			"门槛未启用，没有挂载路径可轮换", "先启用 admin.gate 再轮换")
+		return
+	}
+	token, err := generatePassword()
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "generate_failed", "生成 token 失败", err.Error())
+		return
+	}
+	// token 要放进 URL 路径，去掉可能引起歧义的字符（-/ _ 之外的分隔符）。
+	token = sanitizePathToken(token)
+	if len(token) < 24 {
+		s.writeError(w, http.StatusInternalServerError, "generate_failed", "生成的 token 太短", "")
+		return
+	}
+	sess, _ := s.currentSession(r)
+	recordAuth(authEvent{Actor: actorOf(sess, r), Action: "gate_path_rotate", OK: true,
+		Remote: s.clientIP(r), Detail: "已生成新 token（需改配置并重启）"})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":            true,
+		"token":         token,
+		"mount":         "/" + token + "/",
+		"current_mount": s.mount,
+		"next_step": "把 admin.gate.path_token 写成上面这个值，然后重启进程。" +
+			"为什么不能热改：挂载路径在启动时已烘进 mux 路由、静态资源前缀与 SPA 的 <base href>，" +
+			"运行中搬走挂载点会把正在使用它的浏览器踢出控制台。",
+		"warnings": []string{
+			"token 只显示这一次，请立刻保存。",
+			"重启后旧的挂载路径会立刻失效；如果控制台挂在反向代理后面，记得同步改代理规则。",
+		},
+	})
+}
+
+// sanitizePathToken 把随机口令收敛成适合放进 URL 路径的 token。
+func sanitizePathToken(s string) string {
+	var b strings.Builder
+	for _, c := range s {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
+			b.WriteRune(c)
+		}
+	}
+	if b.Len() > 40 {
+		return b.String()[:40]
+	}
+	return b.String()
+}

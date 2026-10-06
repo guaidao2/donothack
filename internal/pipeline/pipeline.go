@@ -26,6 +26,7 @@ import (
 	"donothack/internal/degrade"
 	"donothack/internal/engine"
 	"donothack/internal/eventstore"
+	"donothack/internal/notify"
 	"donothack/internal/ratelimit"
 	"donothack/internal/realip"
 	"donothack/internal/tx"
@@ -59,6 +60,12 @@ type Options struct {
 	// AllowedHosts 是 Host 白名单判定（nil 表示不校验）。为空名单时也应传 nil。
 	AllowedHosts func(host string) bool
 
+	// Notifier 是告警通道（webhook）。nil 或不启用时是空操作。
+	//
+	// **只发"值得人看"的事件**，且发送在独立 goroutine 里做、有冷却与有界队列 ——
+	// 告警通道挂了不能让业务跟着挂。
+	Notifier *notify.Notifier
+
 	// Events 是内存事件存储（控制台的数据源）。nil 表示不记录。
 	//
 	// **只记"有检测结果"的请求**（命中或非放行裁决），不记纯放行的请求 ——
@@ -87,6 +94,7 @@ type Pipeline struct {
 	ipAllowed    atomic.Uint64
 	hostRejected atomic.Uint64
 	bypassed     atomic.Uint64
+	notified     atomic.Uint64
 }
 
 // Stats 是数据面统计。
@@ -100,6 +108,7 @@ type Stats struct {
 	IPAllowed    uint64
 	HostRejected uint64
 	Bypassed     uint64
+	Notified     uint64
 }
 
 // Stats 返回统计快照。
@@ -114,6 +123,7 @@ func (p *Pipeline) Stats() Stats {
 		IPAllowed:    p.ipAllowed.Load(),
 		HostRejected: p.hostRejected.Load(),
 		Bypassed:     p.bypassed.Load(),
+		Notified:     p.notified.Load(),
 	}
 }
 
@@ -186,6 +196,13 @@ func parseCIDROrIP(s string) (netip.Prefix, error) {
 		return netip.Prefix{}, fmt.Errorf("%q 既不是 CIDR 也不是 IP", s)
 	}
 	return netip.PrefixFrom(addr, addr.BitLen()), nil
+}
+
+// SetNotifier 热替换告警通道（控制台改完 webhook 后调用）。
+func (p *Pipeline) SetNotifier(n *notify.Notifier) {
+	if n != nil {
+		p.o.Notifier = n
+	}
 }
 
 // SetBlockPage 热替换拦截页渲染器（控制台改完拦截页后调用）。
@@ -316,6 +333,17 @@ func (p *Pipeline) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}, engine.Decision{Verdict: tx.VerdictBlock, Events: []tx.Event{{
 				Category: category, Detail: d.Reason, RuleID: "RATE-LIMIT",
 			}}}, ipRes, status, d.Reason)
+			if p.o.Notifier != nil {
+				sev := "high"
+				if d.Banned {
+					sev = "critical"
+				}
+				p.o.Notifier.Notify(notify.Event{
+					Kind: "ratelimit", At: time.Now(), Severity: sev, Category: category,
+					Detail: d.Reason, Method: r.Method, Path: r.URL.Path, ClientIP: ipRes.IP,
+					TxID: txIDFrom(rec), Verdict: "ratelimit",
+				})
+			}
 
 			// 封禁/限速是**洪泛路径**：每秒可能几千个请求，
 			// 这里强制走纯文本，不做模板渲染。
@@ -398,6 +426,7 @@ func (p *Pipeline) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case tx.VerdictBlock:
 		p.blockedTotal.Add(1)
 		p.record(t, dec, ipRes, dec.Status, dec.Reason)
+		p.notifyBlock(t, dec, ipRes)
 		if p.o.BanOnBlock && p.o.Limiter != nil {
 			p.o.Limiter.Ban(ipRes.IP, p.o.BlockBanDuration)
 		}
@@ -425,6 +454,37 @@ func (p *Pipeline) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		p.forward(w, r)
 	}
+}
+
+// notifyBlock 把一次拦截推到告警通道。
+//
+// **不带 payload 原文**：告警常被转到 IM / 邮件 / 工单系统，那些地方的
+// 访问控制通常比 WAF 本身弱得多。只发类目、目标名、请求 ID。
+func (p *Pipeline) notifyBlock(t *tx.Transaction, dec engine.Decision, ipRes realip.Result) {
+	if p.o.Notifier == nil {
+		return
+	}
+	category, ruleID := dominantCategory(dec)
+	sev := "medium"
+	target, detail := "", dec.Reason
+	for _, ev := range dec.Events {
+		if ev.Category == category {
+			if s := ev.Severity.String(); s != "" {
+				sev = s
+			}
+			target = ev.Target
+			if ev.Detail != "" {
+				detail = ev.Detail
+			}
+			break
+		}
+	}
+	p.o.Notifier.Notify(notify.Event{
+		Kind: "block", At: time.Now(), Severity: sev, Category: category,
+		RuleID: ruleID, Target: target, Detail: detail,
+		Method: t.Vars.Method, Path: t.Vars.Path, ClientIP: ipRes.IP,
+		TxID: t.ID, Verdict: dec.Verdict.String(), Score: dec.Score,
+	})
 }
 
 // drop 断连。返回 false 表示当前连接不支持（如 HTTP/2），调用方需退化处理。

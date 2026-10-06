@@ -66,6 +66,10 @@ func authEvents(limit int) []authEvent {
 type loginRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+	// TOTP 兼容多个字段名：控制台前端传 totp，CLI / 脚本可能传 code / totp_code。
+	TOTP     string `json:"totp"`
+	Code     string `json:"code"`
+	TOTPCode string `json:"totp_code"`
 }
 
 // handleLogin 处理登录。
@@ -106,6 +110,42 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		recordAuth(authEvent{Actor: req.Username, Action: "login", OK: false, Remote: ip})
 		s.writeError(w, http.StatusUnauthorized, "invalid_credentials", "用户名或密码不对", "")
 		return
+	}
+
+	// TOTP 两步验证：只在**用户名与口令都对**之后才检查。
+	// 顺序很关键 —— 先过口令再要验证码，否则会告诉攻击者"这个用户名存在且口令对"。
+	if s.totpEnabled() {
+		secret := s.totp.get()
+		if secret == "" {
+			// 配置说启用了但服务端没有密钥（例如改了配置文件却还没重启，
+			// 或密钥文件被清掉）。这种状态下**必须拒绝登录**：
+			// 放行等于"两步验证静默失效"，比登录不上危险得多。
+			recordAuth(authEvent{Actor: req.Username, Action: "login", OK: false, Remote: ip,
+				Detail: "启用了 TOTP 但服务端没有密钥，拒绝登录"})
+			s.writeError(w, http.StatusServiceUnavailable, "totp_misconfigured",
+				"管理员启用了 TOTP 但服务端没有密钥，拒绝登录以免两步验证静默失效",
+				"请设置 admin.totp_enabled: false 后重启，或重新绑定 TOTP")
+			return
+		}
+		// 三种字段名任填其一（前端用 totp，脚本可能用 code / totp_code）。
+		code := firstNonEmpty(req.TOTP, req.Code, req.TOTPCode)
+		if !verifyTOTP(secret, code, time.Now()) {
+			s.loginFails.Add(1)
+			if s.o.Limiter != nil {
+				banned, until := s.o.Limiter.Penalize("console:" + ip)
+				if banned {
+					recordAuth(authEvent{Actor: req.Username, Action: "login", OK: false,
+						Remote: ip, Detail: fmt.Sprintf("TOTP 失败次数过多，封禁至 %s", until.Format(time.RFC3339))})
+					s.writeError(w, http.StatusTooManyRequests, "locked_out", "尝试次数过多，已临时封禁", "")
+					return
+				}
+			}
+			recordAuth(authEvent{Actor: req.Username, Action: "login", OK: false, Remote: ip,
+				Detail: "TOTP 验证码不对"})
+			s.writeError(w, http.StatusUnauthorized, "invalid_totp",
+				"两步验证码不对或已过期", "若认证器密钥填错导致进不去，请把配置里的 admin.totp_enabled 改为 false 后重启")
+			return
+		}
 	}
 
 	idle := s.o.Config.Admin.SessionIdleTimeout.D()
@@ -178,7 +218,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		"csrf":           sess.CSRF,
 		"expires_at":     sess.Expires.Format(time.RFC3339),
 		"idle_timeout_s": int(idle.Seconds()),
-		"totp_enabled":   s.o.Config.Admin.TOTPEnabled,
+		"totp_enabled":   s.totpEnabled(),
 		"version":        s.o.Version,
 		"snapshot":       s.snapshotVersion(),
 	})
@@ -1389,4 +1429,14 @@ func eventQueryFrom(q url.Values, limit int) eventstore.Query {
 		}
 	}
 	return query
+}
+
+// firstNonEmpty 返回第一个非空字符串。
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
