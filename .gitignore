@@ -1,0 +1,48 @@
+# 构建产物
+/dist/
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+wafd
+wafdctl
+
+# 测试与覆盖率
+*.out
+*.test
+coverage.*
+/testdata/tmp/
+.tmp/
+
+# 运行时产物（本地调试用，不进版本库）
+/logs/
+*.jsonl
+*.log
+*.pid
+
+# 压测与基准原始数据（报告进 docs/bench，原始数据不进）
+/bench-out/
+*.prof
+*.trace
+
+# IDE / 编辑器
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 操作系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Go 工作区
+go.work
+go.work.sum
+
+# 本地配置覆盖（示例配置 config.example.yaml 进库，真实配置不进）
+config.local.yaml
+*.local.yaml
