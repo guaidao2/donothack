@@ -277,8 +277,12 @@ func (e *Engine) runPhase(rs *rules.RuleSet, t *tx.Transaction, p tx.Phase, sc *
 			At:         t.StartedAt,
 		}
 		if e.opts.CapturePayload {
-			ev.PayloadBefore = h.Before
-			ev.PayloadAfter = h.After
+			// **必须拷贝**：h.After 指向变换链的复用缓冲（arena），
+			// 下一条规则求值就会把它覆盖掉；h.Before 指向事务的参数 arena，
+			// 而事务是池化的。直接存引用会得到"事件里显示的是另一个请求的值"
+			// 这种极难排查的脏数据。
+			ev.PayloadBefore = append([]byte(nil), h.Before...)
+			ev.PayloadAfter = append([]byte(nil), h.After...)
 		}
 		t.Score.Add(r.Category, r.Score)
 		dec.Events = append(dec.Events, ev)

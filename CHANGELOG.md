@@ -454,3 +454,47 @@ crackweb 定向扫描报出两条注入 finding —— 而同样的 payload **�
   命中即失败并给出 `git add web/` 的提示。
 
 现在门禁会同时挡住两类问题：**交付缺文件**与**假绿灯**。
+
+## [2026-10-06] 零分配门禁达成 + 主动类快速验收（tag `v1.0.0-rc4`）
+
+### `BenchmarkEngine_NoMatch` = **0 allocs/op**（门禁达成）
+
+| 阶段 | allocs/op | B/op |
+| --- | --- | --- |
+| 初始（补上基准时） | 98 | 1988 |
+| AC 加 `ScanBits` + 预筛去闭包 | 11 | 424 |
+| `collapseSpaces` / `SplitContentType` 早退 | 7 | 40 |
+| **变换链 dst 化 + 双缓冲 arena** | **1** | 16 |
+| **路径子串复用** | **0** | **0** |
+
+实测：`BenchmarkEngine_NoMatch` 4294 ns/op、**0 allocs/op**、0 B/op；
+`NoMatchManyHeaders` 同样 0 allocs；命中路径从 53 allocs / 36 KB 降到 17 allocs / 34 KB。
+
+两块关键改动（都踩过坑，注释写清了）：
+
+1. **变换链 dst 化 + 双缓冲 arena**：`Func` 签名加 `dst`，变换写进调用方缓冲；
+   arena 两块交替，避免"下一步覆盖上一步的输入"。
+   * `reserve(slot, len(in))` 必须先备够容量 —— 否则 `append` 另分配的内存不属于 arena；
+   * **只把"确实写在自己缓冲里"的结果存回 arena**。变换"无需改动"时返回的是入参，
+     而它指向**事务参数缓冲**；无条件存回会让 arena 引用别人的内存，
+     下一次写就把参数覆盖 —— 表现是**静默漏检**，由 base64(JSON) 回归测试抓到。
+2. **路径子串复用**：规范化没改动时，路径本就是 `RequestURI` 的子串，直接复用（零分配）；
+   只有真需要改写才建字符串。
+
+顺带修：`targetMatches(plan, string(key))` 的逐参数转换改成 `[]byte` 版本；
+`ev.PayloadBefore = h.Before` 由"直接存切片引用"改为显式拷贝
+（dst 化后 `h.After` 指向复用缓冲，不拷贝会被下一条规则覆盖）。
+
+### 新增：`scripts/active_check.py` —— 主动类快速验收
+
+全站爬取十几分钟且抓不到编码型绕过；日常只要"主动注入类归零"这个结论。
+新脚本只用 `crackweb scan -u`（定向模式）跑 6 个代表性端点，
+**32 秒**出结果，判据只看 `tags` 含 `injection` 的 finding。
+**不提供"忽略某个 check"的开关** —— `ssti` 同时涵盖该拦的模板语法形态与拦不了的裸算术形态，
+按名字豁免会把真的漏检一起放过。
+
+### 验证
+
+门禁（gofmt/vet/test/前端禁令/embed 一致性）全绿；规则集自测通过；
+语料 28/28 拦、18/18 放；透传 6/6 一致；快速主动验收 7844 请求 / 32.2s，
+注入类仅剩记录在案的裸算术 SSTI。

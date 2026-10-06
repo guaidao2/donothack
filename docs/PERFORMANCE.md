@@ -566,3 +566,58 @@ GC CPU 占比阈值原本定在 L2=0.20 / L4=0.50。但 **Go 的 GC pacer 默认
 三轮全部量到 0 RPS —— 而报告照样打印「相对裸代理 < 10%：**达标**（实测 0.0%）」。
 现在：`loadgen` 接受裸秒数，`bench.py` 拿到 0 RPS 或解析失败**立刻硬失败**并打印原始输出。
 **一个不会失败的基准比没有基准更糟** —— 它会给你一个假的绿灯。
+
+### 门禁达成：`BenchmarkEngine_NoMatch` = **0 allocs/op**
+
+上一节记的是"未达成（21 allocs/op）"。这一节是把它做掉的过程与结果。
+
+| 阶段 | allocs/op | B/op | 做了什么 |
+| --- | --- | --- | --- |
+| 初始 | 98 | 1988 | 补上基准，先看清现状 |
+| 无 body 早退 + 池化 parser.Scratch | 27 | 801 | GET 不再白套 MultiReader |
+| 18 个变换加"无变化即返回入参" | 21 | 513 | 正常参数大多不需要变换 |
+| AC 加 `ScanBits`（无回调写位图）+ 预筛去闭包 | 11 | 424 | 逃逸闭包不再逐集合分配 |
+| `collapseSpaces` / `SplitContentType` 早退 | 7 | 40 | Builder/Split 的无条件分配 |
+| **变换链 dst 化 + 双缓冲 arena** | **1** | 16 | 见下 |
+| **路径子串复用** | **0** | **0** | 见下 |
+
+现在的实测（本机 24 核，`-benchtime 400ms`）：
+
+```
+BenchmarkEngine_NoMatch-24              108640    4294 ns/op      0 B/op    0 allocs/op
+BenchmarkEngine_NoMatchManyHeaders-24    51693    9206 ns/op      0 B/op    0 allocs/op
+BenchmarkEngine_Hit-24                   42918   12097 ns/op  34792 B/op   17 allocs/op
+```
+
+命中路径从 53 allocs / 36 KB 降到 **17 allocs / 34 KB** —— 这条路径本来就允许分配
+（要建事件、要记分），但攻击洪泛时它才是内存 churn 的大头，所以一并优化了。
+
+#### 两块最关键的改动
+
+**1. 变换链 dst 化 + 双缓冲 arena。** `Func` 签名加了 `dst`，
+变换把结果写进调用方给的缓冲（容量够就零分配）。`EvalScratch` 里放两块缓冲**交替**使用 ——
+下一步的输出绝不能覆盖上一步的输入（而它正是下一步的输入）。
+
+两条踩过的坑，都写在代码注释里：
+
+* `region` 取缓冲前必须 `reserve(slot, len(in))` 把容量备够。容量不够时 `append` 会另分配一块，
+  那块内存不属于 arena，后面就没法安全复用。
+* **只把"确实写在我们缓冲里"的结果存回 arena**（按起始地址判定）。
+  变换在"无需改动"时会直接返回入参，而那个入参指向**事务的参数缓冲** ——
+  无条件存回会让 arena 引用别人的内存，下一次往 arena 写就把参数覆盖掉。
+  这个 bug 的表现是**静默漏检**（预筛看到被改坏的参数值），
+  由 base64(JSON) 那条回归测试抓到；如果没有那条"从引擎裁决这一端写"的测试，它会溜过去。
+
+**2. 路径子串复用。** `string(normalized)` 是每请求一次的分配。
+但规范化**没有改动**时，路径本来就是 `RequestURI` 的一个子串 —— 直接复用那块字符串即可。
+只有真的需要改写（百分号解码、折叠 `//`、去 `..`）才建新字符串。
+判定用 `equalStringBytes`（逐字节比较，不分配）。
+
+#### 另外修掉的两处
+
+* `targetMatches(plan, string(key))` 在每个参数上做一次 `string` 转换 → 改成 `[]byte` 版本
+  （`equalFoldBytes`），正则目标保留 string 入口（正则本来就要 string）。
+* `ev.PayloadBefore = h.Before` 原来是**直接存切片引用**。dst 化之后 `h.After` 指向复用缓冲，
+  下一条规则求值就会覆盖它 —— 现在改为显式拷贝。
+  顺带说明：即使没有 dst 化，这个写法也依赖"事务 arena 的生命周期恰好覆盖到 record"，
+  本身就是脆的。

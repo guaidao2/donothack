@@ -13,11 +13,23 @@ func apply(t *testing.T, name string, in string, p kv.Params) string {
 	if !ok {
 		t.Fatalf("变换 %q 未注册", name)
 	}
-	out, err := fn([]byte(in), p)
+	// 模拟热路径：同一块缓冲连续调用两次（第二次调用不能污染第一次的结果）。
+	buf := make([]byte, 0, 256)
+	out, err := fn(buf, []byte(in), p)
 	if err != nil {
 		t.Fatalf("变换 %q 对 %q 报错：%v", name, in, err)
 	}
-	return string(out)
+	got := string(out)
+
+	// 再跑一次，验证 dst 复用不会改变结果（别名写错时这里会露出来）
+	out2, err := fn(buf, []byte(in), p)
+	if err != nil {
+		t.Fatalf("变换 %q 第二次调用报错：%v", name, err)
+	}
+	if string(out2) != got {
+		t.Fatalf("变换 %q 复用缓冲后结果变了：%q → %q", name, got, string(out2))
+	}
+	return got
 }
 
 func TestDecodeTransforms(t *testing.T) {
@@ -101,7 +113,7 @@ func TestAllTransformsSurviveGarbage(t *testing.T) {
 	for _, name := range Names() {
 		fn, _ := Lookup(name)
 		for _, in := range inputs {
-			if _, err := fn([]byte(in), nil); err != nil {
+			if _, err := fn(nil, []byte(in), nil); err != nil {
 				t.Errorf("变换 %s 对 %q 报错：%v", name, in, err)
 			}
 		}
@@ -114,7 +126,7 @@ func TestTransformsDoNotMutateInput(t *testing.T) {
 	orig := append([]byte(nil), src...)
 	for _, name := range Names() {
 		fn, _ := Lookup(name)
-		_, _ = fn(src, nil)
+		_, _ = fn(nil, src, nil)
 		if !bytes.Equal(src, orig) {
 			t.Errorf("变换 %s 修改了入参：%q → %q", name, orig, src)
 		}
@@ -127,14 +139,17 @@ func TestCombinedChainDefeatsLayeredEvasion(t *testing.T) {
 	raw := "1%2527%20UN/**/ION%20Se/**/LeCt%201,2--"
 	chain := []string{"doubleUrlDecode", "removeComments", "lowercase"}
 
+	// 与热路径一致：交替使用两块缓冲，避免"下一步覆盖上一步的输入"。
+	var bufs [2][]byte
 	cur := []byte(raw)
-	for _, name := range chain {
+	for i, name := range chain {
 		fn, _ := Lookup(name)
-		out, err := fn(cur, nil)
+		out, err := fn(bufs[i&1][:0], cur, nil)
 		if err != nil {
 			t.Fatalf("链路中 %s 报错：%v", name, err)
 		}
 		cur = out
+		bufs[i&1] = out
 	}
 	got := string(cur)
 	if !bytes.Contains(cur, []byte("union")) || !bytes.Contains(cur, []byte("select")) {

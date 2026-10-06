@@ -301,3 +301,34 @@ crackweb 1.6.4 用**定向扫描**打 `?id=<base64(JSON)>` 形态的接口时，
   -u "http://127.0.0.1:18080/user/id-b64-json?id=eyJ1aWQiOjEsIm1sIjoiMSJ9" \
   -o .tmp/p6/targeted-b64json.json
 ```
+
+### 快速主动验收：`scripts/active_check.py`（**日常改完代码跑这个**）
+
+全站爬取一次十几分钟，而且**抓不到编码型绕过**（见上一节）。
+日常真正要的结论只有一句"主动注入类归零没归零"，所以单独做了个定向脚本：
+
+```bash
+python scripts/active_check.py                       # 默认 6 个代表性端点
+python scripts/active_check.py --base http://127.0.0.1:18080
+```
+
+* 只用 `crackweb scan -u`（定向模式，会做结构推导 + 逐字段 + 编码包装），
+  **不做全站爬取** —— 6 个端点约 32 秒；
+* 判据只看 `tags` 含 `injection` 的 finding，**必须为 0**；
+  `exposed-path` 与 `passive-*` 只记录（应用侧与传输层的事）；
+* **不提供"忽略某个 check"的开关**：`ssti` 这种 check 名字同时涵盖模板语法形态
+  （该拦）与裸算术形态（已接受但拦不了），按名字豁免会连真的漏检一起放过。
+  残留就让它如实报出来，由人决定。
+
+代表性端点表（写在脚本里，每条都注明"打什么"）：
+
+| 端点 | 打什么 |
+| --- | --- |
+| `/user/id-b64-json?id=…` | base64(JSON) 参数文档（编码型绕过那条线） |
+| `/expr/injection?a=1` | SSTI 模板求值 |
+| `/bruteplyground/by-order-id?orderId=1` | 反射型 XSS |
+| `/download?file=readme.txt` | 路径穿越 / LFI |
+| `/product/list?category=books&id=1` | SQL 注入（普通参数） |
+| `/?q=shoes` | 普通业务参数（对照，不该报任何东西） |
+
+本轮实测：**7844 个请求 / 32.2 秒**，注入类 1 条 —— 就是记录在案的裸算术 SSTI。

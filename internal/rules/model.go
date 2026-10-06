@@ -114,7 +114,11 @@ type CompiledRule struct {
 
 // TransformFn 是变换函数签名（与 transform.Func 一致，这里复述以避免
 // rules 包对 transform 包产生不必要的耦合面）。
-type TransformFn = func(in []byte, params kv.Params) ([]byte, error)
+// TransformFn 与 transform.Func 同签名：dst 是调用方给的输出缓冲。
+//
+// 带上 dst 是热路径零分配的关键 —— 变换链在正常请求上要跑「链数 × 值数」次，
+// 每次 make 一块缓冲的话，光这一处每请求就是几十次分配。
+type TransformFn = func(dst, in []byte, params kv.Params) ([]byte, error)
 
 // RuleSet 是编译后的规则全集。不可变。
 type RuleSet struct {

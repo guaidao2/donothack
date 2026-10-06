@@ -27,7 +27,25 @@ import (
 )
 
 // Func 是变换函数的签名。
-type Func func(in []byte, params kv.Params) ([]byte, error)
+//
+// dst 是调用方给的输出缓冲：容量够就直接往里写（**零分配**），不够就自己 make。
+// 这条约定是热路径零分配的关键 —— 变换链在正常请求上要跑「链数 × 值数」次，
+// 每次都 make 一块缓冲的话，光这一处就是每请求几十次分配。
+//
+// 两条必须守住的不变量：
+//  1. **不得原地修改 in**（in 可能是共享的 body 切片，也可能是 arena 里前一步的输出）；
+//  2. **返回 in 本身是合法的**（表示"这一步没改动"），调用方按需处理。
+type Func func(dst, in []byte, params kv.Params) ([]byte, error)
+
+// grow 取一块长度为 n 的输出缓冲：调用方给的 dst 容量够就用它（零分配）。
+//
+// 与 `append(dst[:0], ...)` 的分工：变长输出用 append 形态，定长输出（编解码）用 grow。
+func grow(dst []byte, n int) []byte {
+	if cap(dst) >= n {
+		return dst[:n]
+	}
+	return make([]byte, n)
+}
 
 var registry = map[string]Func{}
 
@@ -117,37 +135,38 @@ func min3(a, b, c int) int {
 // ---------------------------------------------------------------- 基础
 
 func init() {
-	Register("none", func(in []byte, _ kv.Params) ([]byte, error) { return in, nil })
+	Register("none", func(dst, in []byte, _ kv.Params) ([]byte, error) { return in, nil })
 
-	Register("lowercase", func(in []byte, _ kv.Params) ([]byte, error) {
+	Register("lowercase", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		if !hasUpperASCII(in) {
 			return in, nil
 		}
-		out := make([]byte, len(in))
-		for i, c := range in {
+		// 先整段拷进 dst，再在原地改大小写。
+		// dst 是调用方给的**输出**缓冲，改它不违反"不得修改入参"——
+		// 这一点很关键：in 可能是共享的 body 切片，也可能是 arena 里前一步的输出。
+		out := append(dst[:0], in...)
+		for i, c := range out {
 			if c >= 'A' && c <= 'Z' {
-				c += 'a' - 'A'
+				out[i] = c + 'a' - 'A'
 			}
-			out[i] = c
 		}
 		return out, nil
 	})
 
-	Register("uppercase", func(in []byte, _ kv.Params) ([]byte, error) {
+	Register("uppercase", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		if !hasLowerASCII(in) {
 			return in, nil
 		}
-		out := make([]byte, len(in))
-		for i, c := range in {
+		out := append(dst[:0], in...)
+		for i, c := range out {
 			if c >= 'a' && c <= 'z' {
-				c -= 'a' - 'A'
+				out[i] = c - ('a' - 'A')
 			}
-			out[i] = c
 		}
 		return out, nil
 	})
 
-	Register("trim", func(in []byte, _ kv.Params) ([]byte, error) {
+	Register("trim", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		if isTrimmed(in) {
 			return in, nil
 		}
@@ -158,8 +177,8 @@ func init() {
 // ---------------------------------------------------------------- 编码解码
 
 // urlDecodeOnce 做一次 %XX 解码。非法转义原样保留。
-func urlDecodeOnce(in []byte) []byte {
-	out := make([]byte, 0, len(in))
+func urlDecodeOnce(dst, in []byte) []byte {
+	out := dst[:0]
 	for i := 0; i < len(in); i++ {
 		if in[i] == '%' && i+2 < len(in) {
 			hi, ok1 := unhex(in[i+1])
@@ -189,27 +208,30 @@ func unhex(c byte) (byte, bool) {
 }
 
 func init() {
-	Register("urlDecode", func(in []byte, _ kv.Params) ([]byte, error) {
+	Register("urlDecode", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		if !hasByte(in, '%') {
 			return in, nil
 		}
-		return urlDecodeOnce(in), nil
+		return urlDecodeOnce(dst, in), nil
 	})
 
 	// 连续解码两次：对抗 %2527 这种"双写"绕过。
-	Register("doubleUrlDecode", func(in []byte, _ kv.Params) ([]byte, error) {
+	Register("doubleUrlDecode", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		if !hasByte(in, '%') {
 			return in, nil
 		}
-		return urlDecodeOnce(urlDecodeOnce(in)), nil
+		// 第一次解到 dst；第二次起点另取一块（这里让 append 自己扩容即可，
+		// 因为入口是独立的 in 切片，r 与 dst 不重叠时才能这么写）。
+		r := urlDecodeOnce(dst, in)
+		return urlDecodeOnce(nil, r), nil
 	})
 
 	// %u0041 形式（IIS/老式 unicode 编码）
-	Register("urlDecodeUni", func(in []byte, _ kv.Params) ([]byte, error) {
+	Register("urlDecodeUni", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		if !hasByte(in, '%') {
 			return in, nil
 		}
-		out := make([]byte, 0, len(in))
+		out := dst[:0]
 		for i := 0; i < len(in); i++ {
 			if in[i] == '%' && i+5 < len(in) && (in[i+1] == 'u' || in[i+1] == 'U') {
 				v := 0
@@ -235,54 +257,54 @@ func init() {
 		return out, nil
 	})
 
-	Register("base64Decode", func(in []byte, _ kv.Params) ([]byte, error) {
+	Register("base64Decode", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		if !looksBase64ish(in) {
 			return in, nil
 		}
-		dst := make([]byte, base64.StdEncoding.DecodedLen(len(in)))
-		n, err := base64.StdEncoding.Decode(dst, in)
+		buf := grow(dst, base64.StdEncoding.DecodedLen(len(in)))
+		n, err := base64.StdEncoding.Decode(buf, in)
 		if err != nil {
 			// 解码失败返回原值：变换失败不该中断规则评估。
 			return in, nil
 		}
-		return dst[:n], nil
+		return buf[:n], nil
 	})
 
-	Register("base64DecodeExt", func(in []byte, _ kv.Params) ([]byte, error) {
+	Register("base64DecodeExt", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		if !looksBase64ish(in) {
 			return in, nil
 		}
 		s := strings.TrimRight(string(in), "=")
 		for _, enc := range []*base64.Encoding{base64.RawStdEncoding, base64.RawURLEncoding} {
-			dst := make([]byte, enc.DecodedLen(len(s)))
-			n, err := enc.Decode(dst, []byte(s))
+			buf := grow(dst, enc.DecodedLen(len(s)))
+			n, err := enc.Decode(buf, []byte(s))
 			if err == nil {
-				return dst[:n], nil
+				return buf[:n], nil
 			}
 		}
 		return in, nil
 	})
 
-	Register("hexDecode", func(in []byte, _ kv.Params) ([]byte, error) {
+	Register("hexDecode", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		if !isHexString(bytes.TrimSpace(in)) {
 			return in, nil
 		}
-		dst := make([]byte, hex.DecodedLen(len(in)))
-		n, err := hex.Decode(dst, bytes.TrimSpace(in))
+		buf := grow(dst, hex.DecodedLen(len(in)))
+		n, err := hex.Decode(buf, bytes.TrimSpace(in))
 		if err != nil {
 			return in, nil
 		}
-		return dst[:n], nil
+		return buf[:n], nil
 	})
 
-	Register("hexEncode", func(in []byte, _ kv.Params) ([]byte, error) {
-		dst := make([]byte, hex.EncodedLen(len(in)))
-		hex.Encode(dst, in)
-		return dst, nil
+	Register("hexEncode", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		buf := grow(dst, hex.EncodedLen(len(in)))
+		hex.Encode(buf, in)
+		return buf, nil
 	})
 
 	// 0x4142 或 X'4142' 形式的 SQL hex 字面量
-	Register("sqlHexDecode", func(in []byte, _ kv.Params) ([]byte, error) {
+	Register("sqlHexDecode", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		s := bytes.TrimSpace(in)
 		if len(s) > 2 && (s[0] == '0') && (s[1] == 'x' || s[1] == 'X') {
 			s = s[2:]
@@ -291,40 +313,40 @@ func init() {
 		} else {
 			return in, nil
 		}
-		dst := make([]byte, hex.DecodedLen(len(s)))
-		n, err := hex.Decode(dst, s)
+		buf := grow(dst, hex.DecodedLen(len(s)))
+		n, err := hex.Decode(buf, s)
 		if err != nil {
 			return in, nil
 		}
-		return dst[:n], nil
+		return buf[:n], nil
 	})
 
-	Register("htmlEntityDecode", func(in []byte, _ kv.Params) ([]byte, error) {
+	Register("htmlEntityDecode", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		if !hasByte(in, '&') {
 			return in, nil
 		}
-		return htmlEntityDecode(in), nil
+		return htmlEntityDecode(dst, in), nil
 	})
 
-	Register("jsDecode", func(in []byte, _ kv.Params) ([]byte, error) {
+	Register("jsDecode", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		if !hasByte(in, '\\') {
 			return in, nil
 		}
-		return jsDecode(in), nil
+		return jsDecode(dst, in), nil
 	})
 
-	Register("cssDecode", func(in []byte, _ kv.Params) ([]byte, error) {
+	Register("cssDecode", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		if !hasByte(in, '\\') {
 			return in, nil
 		}
-		return cssDecode(in), nil
+		return cssDecode(dst, in), nil
 	})
 
-	Register("escapeSeqDecode", func(in []byte, _ kv.Params) ([]byte, error) {
+	Register("escapeSeqDecode", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		if !hasByte(in, '\\') {
 			return in, nil
 		}
-		out := make([]byte, 0, len(in))
+		out := dst[:0]
 		for i := 0; i < len(in); i++ {
 			if in[i] == '\\' && i+1 < len(in) {
 				switch in[i+1] {
@@ -360,8 +382,8 @@ var htmlEntities = map[string]byte{
 	"equals": '=', "quest": '?', "semi": ';', "commat": '@',
 }
 
-func htmlEntityDecode(in []byte) []byte {
-	out := make([]byte, 0, len(in))
+func htmlEntityDecode(dst, in []byte) []byte {
+	out := dst[:0]
 	for i := 0; i < len(in); i++ {
 		if in[i] != '&' {
 			out = append(out, in[i])
@@ -407,8 +429,8 @@ func htmlEntityDecode(in []byte) []byte {
 	return out
 }
 
-func jsDecode(in []byte) []byte {
-	out := make([]byte, 0, len(in))
+func jsDecode(dst, in []byte) []byte {
+	out := dst[:0]
 	for i := 0; i < len(in); i++ {
 		if in[i] != '\\' || i+1 >= len(in) {
 			out = append(out, in[i])
@@ -450,8 +472,8 @@ func jsDecode(in []byte) []byte {
 	return out
 }
 
-func cssDecode(in []byte) []byte {
-	out := make([]byte, 0, len(in))
+func cssDecode(dst, in []byte) []byte {
+	out := dst[:0]
 	for i := 0; i < len(in); i++ {
 		if in[i] != '\\' || i+1 >= len(in) {
 			out = append(out, in[i])
@@ -492,32 +514,32 @@ func init() {
 	//
 	// crackweb 的"结构改写"里第一条就是注释分割（UN/**/ION），
 	// 所以这条变换是必挂的。
-	Register("removeComments", func(in []byte, _ kv.Params) ([]byte, error) {
+	Register("removeComments", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		if !hasCommentMarker(in) {
 			return in, nil
 		}
-		return replaceComments(in, nil), nil
+		return replaceComments(dst, in, nil), nil
 	})
 
-	Register("replaceComments", func(in []byte, _ kv.Params) ([]byte, error) {
+	Register("replaceComments", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		if !hasCommentMarker(in) {
 			return in, nil
 		}
-		return replaceComments(in, []byte{' '}), nil
+		return replaceComments(dst, in, []byte{' '}), nil
 	})
 
-	Register("removeNulls", func(in []byte, _ kv.Params) ([]byte, error) {
+	Register("removeNulls", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		if !hasByte(in, 0) {
 			return in, nil
 		}
 		return bytes.ReplaceAll(in, []byte{0}, nil), nil
 	})
 
-	Register("compressWhitespace", func(in []byte, _ kv.Params) ([]byte, error) {
+	Register("compressWhitespace", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		if !needsCompressWhitespace(in) {
 			return in, nil
 		}
-		out := make([]byte, 0, len(in))
+		out := dst[:0]
 		prevWS := false
 		for _, c := range in {
 			isWS := c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
@@ -535,11 +557,11 @@ func init() {
 		return out, nil
 	})
 
-	Register("removeWhitespace", func(in []byte, _ kv.Params) ([]byte, error) {
+	Register("removeWhitespace", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		if !anyByte(in, " \t\n\r\v\f") {
 			return in, nil
 		}
-		out := make([]byte, 0, len(in))
+		out := dst[:0]
 		for _, c := range in {
 			switch c {
 			case ' ', '\t', '\n', '\r', '\v', '\f':
@@ -550,30 +572,32 @@ func init() {
 		return out, nil
 	})
 
-	Register("length", func(in []byte, _ kv.Params) ([]byte, error) {
+	Register("length", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		return strconv.AppendInt(nil, int64(len(in)), 10), nil
 	})
 
-	Register("sha1", func(in []byte, _ kv.Params) ([]byte, error) {
+	Register("sha1", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		sum := sha1.Sum(in)
 		return []byte(hex.EncodeToString(sum[:])), nil
 	})
 
-	Register("md5", func(in []byte, _ kv.Params) ([]byte, error) {
+	Register("md5", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		sum := md5.Sum(in)
 		return []byte(hex.EncodeToString(sum[:])), nil
 	})
 
 	// 命令行长参数归并：把 "a  b"、"a\tb" 折成单空格，去掉引号噪声。
-	Register("cmdLine", func(in []byte, _ kv.Params) ([]byte, error) {
-		out, _ := registry["compressWhitespace"](in, nil)
+	Register("cmdLine", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		// 中间两步 bytes.ReplaceAll 自己会分配（它们返回新切片），
+		// 所以这里只保证入口与出口走 dst。
+		out, _ := registry["compressWhitespace"](dst, in, nil)
 		out = bytes.ReplaceAll(out, []byte(`"`), []byte(` `))
 		out = bytes.ReplaceAll(out, []byte(`'`), []byte(` `))
-		return registry["compressWhitespace"](out, nil)
+		return registry["compressWhitespace"](nil, out, nil)
 	})
 
 	// utf8 → \uXXXX 形式（把多字节字符统一成转义，便于比对）
-	Register("utf8ToUnicode", func(in []byte, _ kv.Params) ([]byte, error) {
+	Register("utf8ToUnicode", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		var sb strings.Builder
 		for _, r := range string(in) {
 			if r < utf8.RuneSelf {
@@ -587,18 +611,18 @@ func init() {
 
 	// 路径规范化（与 parser 里的实现保持一致的语义；这里独立实现，
 	// 因为 transform 与 parser 在依赖图上是兄弟，互不依赖）
-	Register("normalizePath", func(in []byte, _ kv.Params) ([]byte, error) {
-		return normalizePath(in, false), nil
+	Register("normalizePath", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		return normalizePath(dst, in, false), nil
 	})
-	Register("normalizePathWin", func(in []byte, _ kv.Params) ([]byte, error) {
-		return normalizePath(in, true), nil
+	Register("normalizePathWin", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		return normalizePath(dst, in, true), nil
 	})
 }
 
 // replaceComments 去掉 /* */、-- 行注释、#、<!-- -->。
 // if with != nil 时用 with 替换成一个空格（避免把"UN/**/ION"变成"UNION"之外还粘连别的）。
-func replaceComments(in []byte, with []byte) []byte {
-	out := make([]byte, 0, len(in))
+func replaceComments(dst, in []byte, with []byte) []byte {
+	out := dst[:0]
 	for i := 0; i < len(in); {
 		switch {
 		case i+1 < len(in) && in[i] == '/' && in[i+1] == '*':
@@ -640,9 +664,9 @@ func replaceComments(in []byte, with []byte) []byte {
 	return out
 }
 
-func normalizePath(in []byte, win bool) []byte {
-	b := make([]byte, 0, len(in))
-	b = append(b, urlDecodeOnce(in)...)
+func normalizePath(dst, in []byte, win bool) []byte {
+	b := dst[:0]
+	b = append(b, urlDecodeOnce(dst, in)...)
 	for i := range b {
 		if b[i] == '\\' && win {
 			b[i] = '/'
@@ -653,7 +677,7 @@ func normalizePath(in []byte, win bool) []byte {
 		}
 	}
 	// 折叠 //
-	out := make([]byte, 0, len(b))
+	out := dst[:0]
 	prevSlash := false
 	for _, c := range b {
 		if c == '/' {

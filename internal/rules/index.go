@@ -131,6 +131,27 @@ type EvalScratch struct {
 	// ctx 是复用的算子求值上下文。**不要每请求新建一个再取地址** ——
 	// 取复合字面量的地址会让它逃逸到堆上，每个规则求值一次就是一次分配。
 	ctx operator.EvalCtx
+
+	// arena 是变换链的双缓冲：变换把结果写进来，容量随最长的值增长后就不再分配。
+	//
+	// **必须是两块、交替使用**：变换的输入往往是上一步的输出，
+	// 若下一步又往同一块写，就会把上一步的结果覆盖掉（自食其尾）。
+	arena [2][]byte
+	slot  int
+}
+
+// reserve 取一块容量至少为 n 的输出缓冲（两块交替）。
+//
+// **先把容量备够**是有原因的：变换写结果用 `append(dst[:0], in...)`，
+// 容量不够时 append 会另分配一块 —— 那块新内存不属于 arena，
+// 后面就没法安全地复用（见 applyChain 里"只存自己的缓冲"那条判据）。
+func (s *EvalScratch) reserve(slot, n int) []byte {
+	b := s.arena[slot]
+	if cap(b) < n {
+		b = make([]byte, n)
+		s.arena[slot] = b
+	}
+	return b[:0]
 }
 
 // Hit 是一次命中。

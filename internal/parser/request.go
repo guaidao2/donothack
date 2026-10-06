@@ -47,7 +47,18 @@ func ParseRequest(t *tx.Transaction, r *http.Request, sc *Scratch, lim Limits) {
 	v.Query = rawQuery
 	normalized, truncated := NormalizePathInto(sc.Aux[:0], r.RequestURI, lim.MaxURILength)
 	sc.Aux = normalized[:0:cap(normalized)]
-	v.Path = string(normalized)
+
+	// 快路径：规范化**没有改动**时，路径本来就是 RequestURI 的一个子串，
+	// 直接复用那块字符串即可（**零分配**）。只有真的需要改写
+	// （百分号解码、折叠 `//`、去除 `..` 等）才建新字符串。
+	//
+	// 这一步是为了热路径零分配：`string(normalized)` 是每个请求都会发生的一次分配，
+	// 而正常业务路径绝大多数根本不需要规范化。
+	if !truncated && rawPath != "" && equalStringBytes(rawPath, normalized) {
+		v.Path = rawPath
+	} else {
+		v.Path = string(normalized)
+	}
 	if truncated {
 		v.AddParseError("URI 超过长度上限，已截断")
 	}
@@ -186,4 +197,20 @@ func expandInto(dst *tx.Params, src *tx.Params, sc *Scratch, lim Limits, depth i
 		// 值是 base64 包装的文档
 		ParseBase64DocInto(dst, sc, string(key), val, lim, depth)
 	}
+}
+
+// equalStringBytes 比较 string 与 []byte 的内容，**不分配**。
+//
+// `string(b) == s` 这种写法在某些场景下会被编译器优化掉，但传参/边界一变就不再成立；
+// 这里显式逐字节比较，行为稳定且可读。
+func equalStringBytes(s string, b []byte) bool {
+	if len(s) != len(b) {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

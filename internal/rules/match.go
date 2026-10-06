@@ -124,7 +124,7 @@ func (rs *RuleSet) evalRuleSingle(t *tx.Transaction, r *CompiledRule, sc *EvalSc
 		if isParams {
 			for i := 0; i < ps.Len(); i++ {
 				key := ps.KeyAt(i)
-				if !targetMatches(plan, string(key)) {
+				if !targetMatches(plan, key) {
 					continue
 				}
 				val := ps.ValueAt(i)
@@ -154,8 +154,10 @@ func (rs *RuleSet) evalRuleSingle(t *tx.Transaction, r *CompiledRule, sc *EvalSc
 
 // evalScalar 处理不是 tx.Params 的集合。
 func (rs *RuleSet) evalScalar(t *tx.Transaction, r *CompiledRule, plan VarPlan, sc *EvalScratch) (Hit, bool) {
+	// 标量集合的键几乎总是空串或 "(raw)"，这里的转换不在热路径上
+	// （热路径是参数类集合的按下标迭代，见 evalRuleSingle）。
 	try := func(key string, val []byte) (Hit, bool) {
-		if !targetMatches(plan, key) {
+		if !targetMatchesString(plan, key) {
 			return Hit{}, false
 		}
 		out := applyChain(r.Transforms, sc, val)
@@ -271,19 +273,48 @@ func paramsOf(v *tx.Collections, collection string) (*tx.Params, bool) {
 
 // applyChain 依次执行变换链。任一变换失败就跳过该变换（用上一步的结果继续），
 // 绝不因为"洗不干净"就放弃检测。
+//
+// 输出缓冲来自 sc 的双缓冲 arena（零分配）；返回值**只在下一次 applyChain 之前有效**，
+// 需要留存必须自己拷贝（`engine` 在记录事件 payload 时就做了拷贝）。
 func applyChain(fns []TransformFn, sc *EvalScratch, in []byte) []byte {
 	if len(fns) == 0 {
 		return in
 	}
 	cur := in
 	for _, fn := range fns {
-		out, err := fn(cur, kv.Params(nil))
+		// 交替使用两块缓冲：下一步的输出绝不能覆盖上一步的输入
+		// （而它正是下一步的输入）。
+		slot := sc.slot ^ 1
+		dst := sc.reserve(slot, len(cur))
+		out, err := fn(dst, cur, kv.Params(nil))
 		if err != nil || out == nil {
 			continue
 		}
+		// **只把"确实写在我们缓冲里"的结果存回 arena。**
+		//
+		// 变换在"无需改动"时会直接返回入参（`return in, nil`），而那个 in 指向
+		// **事务的参数缓冲**。无条件存回就会让 arena 引用一块不属于它的内存，
+		// 下一次往 arena 写就把参数覆盖掉 —— 真踩过：参数被链输出改坏，
+		// 预筛因此看到错的值而静默漏检（base64(JSON) 那条回归测试抓到的）。
+		if usedDst(dst, out) {
+			sc.arena[slot] = out
+		}
+		sc.slot = slot
 		cur = out
 	}
 	return cur
+}
+
+// usedDst 判断 out 是否就是 dst 那块缓冲（按起始地址比较，不需要 unsafe）。
+//
+// 之所以可靠：调用方已经用 reserve 把容量备到了 len(cur)，变换的
+// `append(dst[:0], in...)` 不会重新分配，结果必然从 dst 的起始地址开始。
+func usedDst(dst, out []byte) bool {
+	d := dst[:cap(dst)]
+	if len(d) == 0 || len(out) == 0 {
+		return false
+	}
+	return &d[0] == &out[0]
 }
 
 // PhaseRules 返回某阶段启用的规则（只读）。

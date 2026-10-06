@@ -133,3 +133,60 @@ func TestMatcherEndOffset(t *testing.T) {
 		t.Fatal("unreachable")
 	}
 }
+
+// ScanBits 是预筛热路径上的入口（无回调、直接写位图），必须与 Scan 结果一致。
+//
+// 为什么单写这一条：它替换掉了原来的回调版预筛，而**回调版有测试、位图版没有** ——
+// "新写的热路径代码没测"正是最容易出静默漏检的地方。
+func TestScanBitsMatchesScan(t *testing.T) {
+	patterns := []string{"union select", "script", "/etc/passwd", "sleep(", "zzz", "a"}
+	pats := make([]Pattern, 0, len(patterns))
+	for i, p := range patterns {
+		pats = append(pats, Pattern{Literal: []byte(p), ID: int32(i)})
+	}
+	m := New(pats)
+
+	hays := [][]byte{
+		[]byte("1 UNION SELECT password FROM users--"),
+		[]byte("<script>alert(1)</script>"),
+		[]byte("/etc/passwd"),
+		[]byte("nothing to see here"),
+		[]byte("SLEEP(5)"),
+		[]byte(""),
+	}
+	for _, hay := range hays {
+		// 回调版
+		want := map[int32]bool{}
+		m.Scan(hay, func(id int32, _ int) bool {
+			want[id] = true
+			return true
+		})
+
+		// 位图版
+		bits := make([]uint64, (len(patterns)+63)/64+1)
+		m.ScanBits(hay, bits)
+		got := map[int32]bool{}
+		for i := int32(0); i < int32(len(patterns)); i++ {
+			if bits[i>>6]&(1<<uint(i&63)) != 0 {
+				got[i] = true
+			}
+		}
+
+		if len(want) != len(got) {
+			t.Errorf("hay=%q：Scan 命中 %v，ScanBits 命中 %v", hay, want, got)
+			continue
+		}
+		for id := range want {
+			if !got[id] {
+				t.Errorf("hay=%q：ScanBits 漏掉了 id=%d", hay, id)
+			}
+		}
+	}
+}
+
+// 位图太小的时候不能越界写（调用方可能给了恰好够用的长度）。
+func TestScanBitsRespectsSmallBitmap(t *testing.T) {
+	m := New([]Pattern{{Literal: []byte("abc"), ID: 100}})
+	bits := make([]uint64, 1)           // 只够 id 0..63
+	m.ScanBits([]byte("xxabcxx"), bits) // 不该 panic
+}
