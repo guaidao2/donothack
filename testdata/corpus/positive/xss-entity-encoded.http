@@ -1,0 +1,6 @@
+GET /preview?template=%26lt%3Bscript%26gt%3Balert(1)%26lt%3B/script%26gt%3B&lang=en HTTP/1.1
+Host: docs.example.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Accept: text/html
+
+

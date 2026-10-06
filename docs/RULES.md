@@ -498,3 +498,132 @@ verdict: BLOCK (threshold 5, mode block)
 - [ ] `test` 段是否强制必填（我倾向强制，但会让老规则迁移麻烦）。
 - [ ] `score` 默认取类目分 vs 强制每条显式写。
 - [ ] 是否需要 `SecRule` 之外的 Snort/Suricata 风格规则导入（暂定不做）。
+
+---
+
+## 13. P2 落地补充（**实现层已生效，与上文冲突时以本节为准**）
+
+这一节是把 P2 实现过程中真实踩到的问题写死。它们都来自"规则作者按文档写、实现按另一套
+理解做"的分歧，光看上面几节猜不出来。
+
+### 13.1 `chain` 的确切语义
+
+* **链首**写 `chain: true`，**成员**依次跟随，直到**第一个没有写 `chain` 的规则**为止。
+* 全部成员都命中，这条逻辑规则才算命中；计分取**链首**的 `score`/`category`/`severity`。
+* 链必须**同文件、连续排列、同 phase**。链首后面没有成员 → 加载报错。
+* 任一成员 `enabled: false` → **加载报错**（不是静默失效）。要停用请停用链首。
+
+为什么较真：这不是语法糖。把 `Content-Length 与 Transfer-Encoding 同时出现` 拆成
+两条独立规则时，前一半会对**每个**带该头的请求加分，等于偷偷把拦截阈值从 5 降到 4。
+实测过这个现象。
+
+### 13.2 预筛字面量的提取规则（错了会**漏检**）
+
+预筛的语义是"没命中字面量就跳过这条规则"，所以要能预筛必须满足
+**正则匹配 ⇒ 该字面量必然出现在输入里**。实现按下面的规则提取：
+
+| 算子 | 提取方式 |
+| --- | --- |
+| `contains` / `eq` / `startsWith` / `endsWith` | 该值本身 |
+| `containsAny` / `pm` / `pmFromFile` | 全部模式 |
+| `regex` / `regexCaseInsensitive` | **最长字面量子串**（不是正则前缀） |
+
+并且：正则里出现**交替 `|`** 或**可选的组 `(...)?` / `(...)*` / `{0,n}`** 时
+**放弃预筛**（该规则每请求评估）。
+
+原因：`\.(?:git|svn|env)/` 可以只靠 "git" 匹配，而我们只能提一个最长字面量
+（比如 "git-credentials"）；输入里只有 `.git` 时预筛就会跳过这条规则 —— 实测
+`SCAN-2003`（dotfile 探测）与 `UPLOAD-1001`（双扩展名）就栽在这上面，
+表现为"规则明明写对了却完全没命中"。
+
+同理，字面量短于 3 字节**不进**自动机（短字面量会让自动机在每个输入上命中，预筛等于失效）。
+
+想要高的预筛命中率，就**优先用 `pm` 而不是 `regex`** —— `pm` 的限制是精确的，可以放心预筛。
+
+### 13.3 算子参数白名单（`depth` 写成了 `min_depth` 之类）
+
+每个算子只接受固定参数名，**传了别的名字直接报错**。这条校验抓到过真实笔误
+（`detectPathTraversal` 被写成 `depth: 8`，若静默忽略就会永远用默认阈值）。
+
+| 算子 | 参数 |
+| --- | --- |
+| `detectSQLi` | `min_fingerprint_len`（默认 8） |
+| `detectXSS` | `min_fingerprint_len`（默认 6） |
+| `detectPathTraversal` | `min_depth`（默认 1；**建议 ≥2**，单级 `../` 在业务里很常见） |
+| `entropy` | `min_bits`（0~8）、`min_len` |
+| `containsShellChars` / `isWebshellContent` / `luhn` / `unconditionalMatch` | 不接受任何参数 |
+| `pm` / `pmFromFile` | `patterns` / `file`、`match_all` |
+| `regex` / `regexCaseInsensitive` | `pattern`、`capture` |
+| `allOf` / `anyOf` | `operators`（列表） |
+| `not` | `operator`（单个） |
+
+嵌套算子一律写成 `{name: ..., params: {...}}`：
+
+```yaml
+    operator:
+      name: allOf
+      params:
+        operators:
+          - name: contains
+            params: {value: "select"}
+          - name: not
+            params:
+              operator:
+                name: contains
+                params: {value: "select_ok"}
+```
+
+组合嵌套上限 4 层。
+
+### 13.4 变换的精确行为
+
+* `urlDecode`：只解 `%XX`，**`+` 不当空格**（与 ModSecurity 一致）。要处理表单语义请显式加
+  自己的规则或用 form 解析（`ARGS_POST` 已经按表单语义解过 `+`）。
+* `doubleUrlDecode`：连解两次，对抗 `%2527` 双写。
+* `removeComments`：**删除**注释（`/* */`、`-- 到行尾`、`<!-- -->`）。
+* `replaceComments`：把注释**替换成一个空格**。
+  SQL 里 `union/**/select` 用 `removeComments` 会粘成 `unionselect`，用 `replaceComments`
+  才是 `union select` —— **SQL 类规则请用 `replaceComments`**。
+* 所有变换都不得原地修改入参；解码失败返回原值（不报错、不中断链）。
+
+### 13.5 可观测性边界（**决定哪些规则根本写不出来**）
+
+`REQUEST_HEADERS` 里能看到 `transfer-encoding` 与 `content-length`（parser 会把 Go 从
+`r.Header` 移走的那两个头按解析后的语义补回来），但：
+
+> **`Content-Length` 与 `Transfer-Encoding` 同时存在这一事实，在 handler 层不可观测。**
+> Go 的 `net/http` 在解析阶段就把 `Transfer-Encoding` 移出 `r.Header`，chunked 时
+> 连 `Content-Length` 一起删（`ContentLength` 变成 -1）。证据钉在
+> `internal/parser/headers_test.go`。
+
+后果与取舍：
+
+* 写"CL.TE 走私"规则在 `REQUEST_HEADERS` 上匹配这两个头**永远不会命中** —— 属于死规则，
+  加载器不会拦你，但你会得到虚假的安全感。**不要写**。（原 `PROTO-1006/1007` 因此已删除，
+  见 `rules/00-protocol.yaml` 里的说明。）
+* 风险不等于可利用：Go 服务器与反向代理会按解析后的语义**重新编码**请求再发给上游，
+  CL/TE 歧义不会传到后端 —— 这一层是把歧义**归一化掉**，不是把它**检测出来**。
+* 真要检测，必须在 `net/http` 之前抓原始字节（未实现，属 P7 之后的能力）。
+* 仍需警惕的部署形态：donothack 前面还有一层自己解释 CL/TE 的代理时，走私可能发生在
+  "前端代理 ↔ donothack"之间。这是拓扑问题，应在部署文档里写明。
+
+### 13.6 变量集合清单（实现已封版）
+
+`ARGS`、`ARGS_GET`、`ARGS_POST`、`ARGS_JSON`、`ARGS_XML`、`ARGS_NAMES`、`ARGS_COUNT`、
+`REQUEST_URI`、`REQUEST_URI_LENGTH`、`REQUEST_PATH`、`REQUEST_METHOD`、`REQUEST_PROTOCOL`、
+`REQUEST_HEADERS`、`REQUEST_HEADERS_NAMES`、`REQUEST_COOKIES`、`REQUEST_COOKIES_NAMES`、
+`REQUEST_BODY`、`REQUEST_BODY_LENGTH`、`FILES`、`FILES_NAMES`、`FILES_SIZES`、`FILES_MAGIC`、
+`REMOTE_ADDR`。
+
+* `REQUEST_PATH` 会**逐值两次**：先原始路径（目标名标 `(raw)`），再规范化路径 —— 两种形态都检测。
+* `FILES` 的值是**文件名原值**（`../../shell.php.jpg` 里的穿越与双扩展名都看得到），
+  不是 Go 剥过目录的 `FileName()`。
+* 写任何 `RESPONSE_*` 集合 → **加载期报错**（本轮不实现响应检测）。
+
+### 13.7 `test` 段的确切语义
+
+`test.positive` / `test.negative` 里的字符串是**单个值**，加载期会把它当作一个输入值
+走一遍该规则的变换链与算子：正样本必须命中，负样本必须不命中。它**不模拟**请求上下文
+（不是完整报文），所以样本应当是"参数值"形态而不是整条 HTTP 报文。
+
+负样本至少 2 条，其中至少一条要是真实业务流量形态。自测不通过 → **整批拒绝加载**。

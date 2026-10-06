@@ -34,9 +34,11 @@ rules:
       - compressWhitespace
       - lowercase
     operator:
-      name: regex
+      name: pm
       params:
-        pattern: '<script|</script'
+        patterns:
+          - "<script"
+          - "</script"
     test:
       positive:
         - "<script>alert(1)</script>"
@@ -101,9 +103,33 @@ rules:
       - compressWhitespace
       - lowercase
     operator:
-      name: regex
+      name: pm
       params:
-        pattern: '(?:javascript|vbscript|livescript)\s*:\s*(?:alert|eval|confirm|prompt|document\.|window\.|top\.|self\.|location|fetch|xmlhttprequest|new\s|function|settimeout|setinterval|import\()|data:text/html'
+        patterns:
+          - "javascript:alert"
+          - "javascript: alert"
+          - "javascript:eval"
+          - "javascript: eval"
+          - "javascript:confirm"
+          - "javascript: confirm"
+          - "javascript:prompt"
+          - "javascript: document"
+          - "javascript:document"
+          - "javascript:window"
+          - "javascript:location"
+          - "javascript:fetch"
+          - "javascript:xmlhttprequest"
+          - "javascript:new "
+          - "javascript:function"
+          - "javascript:settimeout"
+          - "javascript:setinterval"
+          - "javascript:import("
+          - "javascript:/*"
+          - "vbscript:"
+          - "livescript:"
+          - "data:text/html"
+          - "data:text/javascript"
+          - "data:application/xhtml"
     test:
       positive:
         - "<a href=\"javascript:alert(1)\">click</a>"
@@ -177,9 +203,65 @@ rules:
       - compressWhitespace
       - lowercase
     operator:
-      name: regex
+      name: pm
       params:
-        pattern: '\bon(?:error|load|click|focus|blur|mouseover|mouseenter|mouseleave|submit|change|input|toggle|animationstart|pointerover|pointerdown|wheel|scroll|dragstart|drag|drop|copy|paste|keydown|keyup|keypress|dblclick|contextmenu)\s*=\s*[\x22\x27]?\s*(?:alert|eval|confirm|prompt|document|window|top|self|javascript|location|fetch|xmlhttprequest)'
+        patterns:
+          - "onerror=alert"
+          - "onerror=eval"
+          - "onerror=confirm"
+          - "onerror=prompt"
+          - "onerror=document"
+          - "onerror=\""
+          - "onerror='"
+          - "onload=alert"
+          - "onload=eval"
+          - "onload=confirm"
+          - "onload=prompt"
+          - "onload=document"
+          - "onload=\""
+          - "onload='"
+          - "onclick=alert"
+          - "onclick=eval"
+          - "onclick=confirm"
+          - "onclick=prompt"
+          - "onclick=document"
+          - "onclick=\""
+          - "onclick='"
+          - "onfocus=alert"
+          - "onfocus=eval"
+          - "onfocus=confirm"
+          - "onfocus=prompt"
+          - "onfocus=document"
+          - "onfocus=\""
+          - "onfocus='"
+          - "onmouseover=alert"
+          - "onmouseover=eval"
+          - "onmouseover=confirm"
+          - "onmouseover=prompt"
+          - "onmouseover=document"
+          - "onmouseover=\""
+          - "onmouseover='"
+          - "onsubmit=alert"
+          - "onsubmit=eval"
+          - "onsubmit=confirm"
+          - "onsubmit=prompt"
+          - "onsubmit=document"
+          - "onsubmit=\""
+          - "onsubmit='"
+          - "ontoggle=alert"
+          - "ontoggle=eval"
+          - "ontoggle=confirm"
+          - "ontoggle=prompt"
+          - "ontoggle=document"
+          - "ontoggle=\""
+          - "ontoggle='"
+          - "onanimationstart=alert"
+          - "onanimationstart=eval"
+          - "onanimationstart=confirm"
+          - "onanimationstart=prompt"
+          - "onanimationstart=document"
+          - "onanimationstart=\""
+          - "onanimationstart='"
     test:
       positive:
         - "onerror=alert(1)"
@@ -288,9 +370,17 @@ rules:
       - compressWhitespace
       - lowercase
     operator:
-      name: regex
+      name: pm
       params:
-        pattern: '(?:\bexpression\s*\(|-moz-binding|behavior\s*:\s*url|@import\s+(?:url|\x22|\x27))'
+        patterns:
+          - "expression("
+          - "expression ("
+          - "-moz-binding"
+          - "behavior:url"
+          - "behavior: url"
+          - "@import url"
+          - "@import \""
+          - "@import '"
     action:
       type: log
     test:

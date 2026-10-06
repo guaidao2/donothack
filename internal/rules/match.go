@@ -67,8 +67,37 @@ func (rs *RuleSet) Match(t *tx.Transaction, p tx.Phase, sc *EvalScratch, emit fu
 	}
 }
 
-// evalRule 对单条规则求值：展开 target，逐值跑变换链 + 算子。
+// evalRule 对单条规则求值。链式规则要求**全部成员都命中**才算命中。
 func (rs *RuleSet) evalRule(t *tx.Transaction, r *CompiledRule, sc *EvalScratch) (Hit, bool) {
+	if len(r.ChainMembers) > 1 {
+		return rs.evalChain(t, r, sc)
+	}
+	return rs.evalRuleSingle(t, r, sc)
+}
+
+// evalChain 按顺序评估链条的每个成员，任一不命中即整条不命中。
+//
+// 报告的是**链首**的 ID/类目/分数（心智模型是"一条规则"），
+// 但目标位置取最后一个命中的成员，这样审计里能看到到底卡在哪个条件上。
+func (rs *RuleSet) evalChain(t *tx.Transaction, head *CompiledRule, sc *EvalScratch) (Hit, bool) {
+	var last Hit
+	for _, m := range head.ChainMembers {
+		hit, ok := rs.evalRuleSingle(t, m, sc)
+		if !ok {
+			return Hit{}, false
+		}
+		last = hit
+	}
+	return Hit{
+		Rule:    head,
+		Target:  last.Target,
+		Detail:  "chain[" + last.Rule.ID + "]: " + last.Detail,
+		Matched: last.Matched,
+	}, true
+}
+
+// evalRuleSingle 展开 target，逐值跑变换链 + 算子。
+func (rs *RuleSet) evalRuleSingle(t *tx.Transaction, r *CompiledRule, sc *EvalScratch) (Hit, bool) {
 	for _, plan := range r.Targets {
 		matched := false
 		var hit Hit

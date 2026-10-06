@@ -1,0 +1,8 @@
+POST /api/v1/checkout HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 91
+Accept: text/html
+
+card_number=4111111111111111&expiry=12%2F28&cvc=123&address=12+Union+Street%2C+Springfield

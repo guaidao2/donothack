@@ -63,8 +63,19 @@ type CompiledRule struct {
 	Tags     []string
 
 	HardBlock bool // 命中即终止本阶段并立即拦截
-	Chain     bool // 链式规则：上一条命中才评估下一条
-	Enabled   bool
+	// Chain 在 YAML 里表示"本条是链式规则的头"。编译期会被消费掉：
+	// 头的 ChainMembers 非空，成员标 chainMember。
+	Chain bool
+	// ChainMembers 是链式规则的全部成员（含头自己）。**全部成员都命中，这条才算命中。**
+	//
+	// 语义按 ModSecurity：链首写 chain: true，成员依次跟到第一个没写 chain 的规则为止。
+	// 这不是锦上添花 —— 像"Content-Length 与 Transfer-Encoding 同时出现"这种判据，
+	// 拆成两条独立规则时，前一条会对**每个**带 Content-Length 的请求加分，
+	// 等于偷偷把拦截阈值从 5 降到 4。
+	ChainMembers []*CompiledRule
+	// chainMember 表示它只是链条成员，不单独执行。
+	chainMember bool
+	Enabled     bool
 
 	Targets        []VarPlan
 	Transforms     []TransformFn

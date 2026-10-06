@@ -38,8 +38,11 @@ rules:
       - lowercase
     operator:
       name: detectPathTraversal
+      # min_depth=2：至少两级回溯（或命中敏感文件/流包装器）才立案。
+      # 只要求一级会把 `?file=../templates/x.html` 这类正常相对路径打死
+      # （单级相对路径在业务里很常见，见 LFI-7002 的说明）。
       params:
-        depth: 8
+        min_depth: 2
     test:
       positive:
         - "../../../../etc/passwd"
@@ -221,7 +224,6 @@ rules:
           - "glob://"
           - "data://text"
           - "data://plain"
-          - "data:text/plain"
           - "file:///etc"
           - "file:///c:"
           - "file:///proc"
@@ -254,25 +256,43 @@ rules:
       - removeNulls
       - lowercase
     operator:
-      name: regex
+      name: pm
       params:
-        pattern: '(?:\.\.[\\/]){1,}(?:etc|proc|root|home|var|usr|boot|windows|winnt|sys|dev)[\\/]'
+        patterns:
+          - "../etc/"
+          - "../proc/"
+          - "../root/"
+          - "../home/"
+          - "../var/"
+          - "../usr/"
+          - "../boot/"
+          - "../windows/"
+          - "../winnt/"
+          - "../sys/"
+          - "../dev/"
+          - "..\\etc\\"
+          - "..\\windows\\"
+          - "..\\winnt\\"
+          - "..\\boot\\"
+          - "..%2fetc%2f"
+          - "..%2fproc%2f"
+          - "..%2fwindows%2f"
     test:
       positive:
         - "../../etc/passwd"
         - "..\\..\\windows\\win.ini"
         - "..%2f..%2fproc%2fself%2fenviron"
       negative:
-        - "../images/logo.png"
+        - "../docs/specification.pdf"
         - "report-2024.pdf"
-        - "../../data/export.csv"
+        - "data/export.csv"
 
   - id: RFI-8001
     phase: 2
-    severity: high
+    severity: critical
     category: rfi
-    score: 4
-    message: "SSRF/RFI 特征：指向内网地址或云元数据端点"
+    score: 5
+    message: "SSRF 特征：指向回环地址或云元数据端点"
     tags: [rfi, ssrf, owasp-a10, cloud-metadata]
     targets:
       - collection: ARGS
@@ -294,23 +314,12 @@ rules:
           - "metadata.google.internal"
           - "http://100.100.100.200"
           - "instance-data"
-          - "http://10."
-          - "http://192.168."
-          - "http://172.16."
-          - "http://172.17."
-          - "http://172.18."
-          - "http://172.19."
-          - "http://172.2"
-          - "http://172.30."
-          - "http://172.31."
           - "gopher://127.0.0.1"
           - "dict://127.0.0.1"
-          - "file:///c:/windows"
     test:
       positive:
         - "http://169.254.169.254/latest/meta-data/iam/security-credentials/"
         - "http://127.0.0.1:8080/admin"
-        - "http://192.168.1.1/status"
         - "http://metadata.google.internal/computeMetadata/v1/"
       negative:
         - "https://api.example.com/v1/items"
@@ -361,3 +370,47 @@ rules:
         - "https://example.com/callback"
         - "https://hooks.example.com/webhook"
         - "the callback endpoint is documented in the API guide"
+
+  # 私网地址段单列一条、给低分：内部工具（图片代理、webhook 配置、健康巡检）
+  # 合法地传 10.x / 192.168.x 是常见业务形态，不能和云元数据端点同分。
+  - id: RFI-8003
+    phase: 2
+    severity: medium
+    category: rfi
+    score: 3
+    message: "SSRF 迹象：请求中出现私网地址或本地文件协议"
+    tags: [rfi, ssrf, owasp-a10, private-network]
+    targets:
+      - collection: ARGS
+      - collection: REQUEST_BODY
+    transforms:
+      - urlDecode
+      - urlDecode
+      - lowercase
+    operator:
+      name: pm
+      params:
+        patterns:
+          - "http://10."
+          - "http://192.168."
+          - "http://172.16."
+          - "http://172.17."
+          - "http://172.18."
+          - "http://172.19."
+          - "http://172.2"
+          - "http://172.30."
+          - "http://172.31."
+          - "file:///c:/windows"
+          - "file:///c:/users"
+          - "http://[0:0:0:0:0:ffff:127.0.0.1]"
+    action:
+      type: log
+    test:
+      positive:
+        - "http://192.168.1.1/status"
+        - "http://10.20.30.40:8080/actuator/health"
+        - "http://172.16.5.9/admin"
+      negative:
+        - "https://api.example.com/v1/items"
+        - "https://cdn.example.com/assets/logo.png"
+        - "the internal wiki is at https://wiki.corp.example"

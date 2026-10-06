@@ -1,0 +1,8 @@
+POST /comment HTTP/1.1
+Host: blog.example.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 58
+Cookie: session=abc123
+
+redirect=%2F%2Fevil.example%2F%0d%0aContent-Length%3A%200

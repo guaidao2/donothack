@@ -1,0 +1,12 @@
+POST /api/v1/upload HTTP/1.1
+Host: app.example.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundaryQa9zXk2Lm4Tp
+Content-Length: 212
+
+------WebKitFormBoundaryQa9zXk2Lm4Tp
+Content-Disposition: form-data; name="file"; filename="../../../var/www/html/logo.png"
+Content-Type: image/png
+
+PNG placeholder content
+------WebKitFormBoundaryQa9zXk2Lm4Tp--

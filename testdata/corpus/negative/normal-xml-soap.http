@@ -1,0 +1,14 @@
+POST /soap/OrderService HTTP/1.1
+Host: erp.example.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Content-Type: text/xml; charset=utf-8
+SOAPAction: "urn:order:create"
+Content-Length: 239
+Accept: text/xml
+
+<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <createOrder><customerId>1042</customerId><amount>19.90</amount></createOrder>
+  </soap:Body>
+</soap:Envelope>

@@ -41,7 +41,7 @@ rules:
     operator:
       name: regex
       params:
-        pattern: '\bunion\b[^a-z0-9]{0,8}\bselect\b'
+        pattern: 'union\b(?:\s+(?:all|distinct)\b)?[^a-z0-9]{0,8}\bselect\b'
     test:
       positive:
         - "1' UNION SELECT 1,2,3--"
@@ -52,7 +52,7 @@ rules:
         - "select your country from the list"
         - "union square station"
         - "We visited the European Union in 2019 and selected a hotel"
-        - "Select all items in the list" 
+        - "Select all items in the list"
 
   - id: SQLI-4002
     phase: 2
@@ -283,9 +283,19 @@ rules:
       - compressWhitespace
       - lowercase
     operator:
-      name: regex
+      name: pm
       params:
-        pattern: '\b(?:union|select|from|where|having|order\s+by|group\s+by|into|insert|concat|unhex|char|cast|convert)\b[^a-z0-9]{1,6}0x[0-9a-f]{8,}'
+        patterns:
+          - "union 0x"
+          - "select 0x"
+          - "from 0x"
+          - "where 0x"
+          - "having 0x"
+          - "insert 0x"
+          - "values 0x"
+          - "into 0x"
+          - "concat 0x"
+          - "unhex 0x"
     action:
       type: log
     test:
@@ -307,16 +317,51 @@ rules:
     tags: [sqli, nosql, owasp-a03]
     targets:
       - collection: ARGS
-      - collection: ARGS_JSON
       - collection: REQUEST_BODY
     transforms:
       - urlDecode
       - urlDecode
       - lowercase
     operator:
-      name: regex
+      name: pm
       params:
-        pattern: "\\$(?:ne|gt|gte|lt|lte|regex|where|exists|nin|expr|elemmatch|jsonschema)[\":\\]\\[=\\s]"
+        patterns:
+          - "\"$ne\""
+          - "[$ne]"
+          - "$ne="
+          - "\"$gt\""
+          - "[$gt]"
+          - "$gt="
+          - "\"$gte\""
+          - "[$gte]"
+          - "$gte="
+          - "\"$lt\""
+          - "[$lt]"
+          - "$lt="
+          - "\"$lte\""
+          - "[$lte]"
+          - "$lte="
+          - "\"$regex\""
+          - "[$regex]"
+          - "$regex="
+          - "\"$where\""
+          - "[$where]"
+          - "$where="
+          - "\"$exists\""
+          - "[$exists]"
+          - "$exists="
+          - "\"$nin\""
+          - "[$nin]"
+          - "$nin="
+          - "\"$expr\""
+          - "[$expr]"
+          - "$expr="
+          - "\"$elemmatch\""
+          - "[$elemmatch]"
+          - "$elemmatch="
+          - "\"$jsonschema\""
+          - "[$jsonschema]"
+          - "$jsonschema="
     test:
       positive:
         - '{"username":{"$ne":null}}'

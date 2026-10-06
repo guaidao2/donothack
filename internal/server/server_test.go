@@ -81,6 +81,7 @@ func newTestServer(t *testing.T, upstreamURL string, maxConns int, next http.Han
 		Logger:        lg,
 		Next:          next,
 		Version:       "test",
+		Ruleset:       "test-ruleset",
 	})
 	// 这些用例直接调 Handler()，没有走 ServeListener，所以手动把 ready 置上：
 	// /readyz 在监听器未起来时返回 503 是正确行为，不是这里要测的东西。
@@ -146,9 +147,25 @@ func TestReadyzExposesProfileAndBudget(t *testing.T) {
 	if !info.UpstreamOK {
 		t.Errorf("IP 字面量上游应当被判为可达：%s", info.UpstreamDetail)
 	}
-	// 规则集要到 P2 才有；/readyz 必须如实说明，不能假装就绪。
-	if !strings.Contains(info.Ruleset, "P2") {
-		t.Errorf("规则集状态应如实说明尚未实现，实际 %q", info.Ruleset)
+	// /readyz 必须原样报出加载了哪个规则集 —— 排查"规则到底生效没有"全靠它。
+	if info.Ruleset != "test-ruleset" {
+		t.Errorf("规则集摘要应原样暴露，实际 %q", info.Ruleset)
+	}
+}
+
+// 没加载规则集时必须如实为空，不能假装有防护。
+func TestReadyzReportsEmptyRuleset(t *testing.T) {
+	env := newTestServer(t, "http://127.0.0.1:9000", 16, nil)
+	env.srv.o.Ruleset = ""
+	rec := httptest.NewRecorder()
+	env.srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/readyz", nil))
+
+	var info ReadyInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
+		t.Fatalf("解析 /readyz 响应失败：%v", err)
+	}
+	if info.Ruleset != "" {
+		t.Errorf("未加载规则集时应为空，实际 %q", info.Ruleset)
 	}
 }
 

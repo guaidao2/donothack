@@ -3,6 +3,7 @@ package parser
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -62,6 +63,21 @@ func ParseRequest(t *tx.Transaction, r *http.Request, sc *Scratch, lim Limits) {
 
 	// ---- 请求头 ----
 	ParseHeadersInto(&v.Headers, r.Header, sc, lim)
+	// Go 的 net/http 会把 Transfer-Encoding 从 Header 移走（放进 r.TransferEncoding），
+	// 并在 chunked 时删掉 Content-Length。为了让规则看到"上游将会看到的东西"，
+	// 这里按解析后的语义把头补回来 —— 否则针对这两个头的规则是**死规则**，
+	// 而"以为在防请求走私其实没有"比没有规则更危险。
+	//
+	// 注意由此确定的可观测边界：CL+TE 冲突本身在本层已经不可观测（Go 归一化掉了，
+	// 所以歧义也传不到上游）。要检测它必须在 net/http 之前抓原始字节，见 docs/DESIGN.md。
+	if len(r.TransferEncoding) > 0 {
+		v.Headers.AddString("transfer-encoding", strings.Join(r.TransferEncoding, ","))
+	}
+	if r.ContentLength > 0 {
+		if _, ok := v.Headers.Get("content-length"); !ok {
+			v.Headers.AddString("content-length", strconv.FormatInt(r.ContentLength, 10))
+		}
+	}
 	if ua := r.Header.Get("Cookie"); ua != "" {
 		ParseCookiesInto(&v.Cookies, ua, sc, lim)
 	}

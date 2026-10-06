@@ -201,9 +201,30 @@ rules:
     transforms:
       - lowercase
     operator:
-      name: regex
+      name: pm
       params:
-        pattern: '/(?:c99|r57|b374k|wso|alfa|indoxploit|marijuana|bypass|webshell|backdoor|kacak|sadrazam|pws|k1ll|1337|x7|aspxspy|jspspy|antsword|behinder|godzilla)\.(?:php[0-9]?|phtml|phar|pht|jsp|jspx|jspf|asp|aspx|ashx|asmx|cgi|pl|py|rb|sh)$'
+        patterns:
+          - "/c99."
+          - "/r57."
+          - "/b374k."
+          - "/wso."
+          - "/alfa."
+          - "/indoxploit."
+          - "/marijuana."
+          - "/bypass."
+          - "/webshell."
+          - "/backdoor."
+          - "/kacak."
+          - "/sadrazam."
+          - "/pws."
+          - "/k1ll."
+          - "/1337."
+          - "/x7."
+          - "/aspxspy."
+          - "/jspspy."
+          - "/antsword."
+          - "/behinder."
+          - "/godzilla."
     test:
       positive:
         - "/uploads/c99.php"
@@ -218,7 +239,7 @@ rules:
     phase: 2
     severity: high
     category: upload
-    score: 4
+    score: 5
     message: "文件上传特征：危险脚本的复合扩展名"
     tags: [upload, owasp-a04, double-extension]
     targets:
@@ -245,7 +266,7 @@ rules:
     phase: 2
     severity: high
     category: upload
-    score: 4
+    score: 5
     message: "文件上传特征：文件名含路径回溯序列"
     tags: [upload, path-traversal, owasp-a01]
     targets:

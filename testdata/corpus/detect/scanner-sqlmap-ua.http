@@ -1,0 +1,6 @@
+GET /search?q=shoes HTTP/1.1
+Host: shop.example.com
+User-Agent: sqlmap/1.7.2#stable (https://sqlmap.org)
+Accept: */*
+Content-Length: 0
+

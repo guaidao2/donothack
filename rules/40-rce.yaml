@@ -348,9 +348,26 @@ rules:
       - urlDecode
       - lowercase
     operator:
-      name: regex
+      name: pm
       params:
-        pattern: '\{\{[^}]{0,120}(?:__class__|__mro__|__subclasses__|__globals__|__builtins__|__init__|__base__|config\b|self\.|request\.|cycler|joiner|namespace|lipsum|getenv|os\.environ|popen|system\()|\$\{[^}]{0,120}(?:class\.forname|getruntime|runtime\b|scriptengine|\bt\(|processbuilder|exec\()|#\{[^}]{0,120}(?:class\.forname|getruntime|runtime\b|processbuilder)|\*\{[^}]{0,120}(?:__class__|getruntime|runtime\b|processbuilder|\bt\()'
+        patterns:
+          - "__class__"
+          - "__mro__"
+          - "__subclasses__"
+          - "__globals__"
+          - "__builtins__"
+          - "__init__"
+          - "class.forname"
+          - "getruntime"
+          - "processbuilder"
+          - "scriptengine"
+          - "ognl."
+          - "os.environ"
+          - "popen("
+          - "runtime().exec"
+          - "freemarker.template"
+          - "velocity.evaluate"
+          - "spelexpressionparser"
     test:
       positive:
         - "{{config.__class__.__init__.__globals__['os'].popen('id').read()}}"

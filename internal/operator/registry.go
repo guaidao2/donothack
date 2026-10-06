@@ -99,6 +99,18 @@ func registerStringOps() {
 		return regexOp{re: re, capture: p.Bool("capture"), pattern: pattern}, nil
 	})
 
+	Register("regexCaseInsensitive", func(_ *CompileCtx, p kv.Params) (Compiled, error) {
+		pattern := p.String("pattern")
+		if pattern == "" {
+			return nil, errors.New("缺少 pattern 参数")
+		}
+		re, err := regexp.Compile("(?i)" + pattern)
+		if err != nil {
+			return nil, fmt.Errorf("正则无法编译（只支持 RE2 语法）：%w", err)
+		}
+		return regexOp{re: re, capture: p.Bool("capture"), pattern: pattern}, nil
+	})
+
 	Register("pm", func(_ *CompileCtx, p kv.Params) (Compiled, error) {
 		pats := p.Strings("patterns")
 		if len(pats) == 0 {

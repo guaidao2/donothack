@@ -91,7 +91,7 @@ rules:
     phase: 2
     severity: high
     category: protocol
-    score: 4
+    score: 5
     message: "参数或请求行中出现 CRLF 序列（响应头注入 / 请求头拆分特征）"
     tags: [protocol, crlf, header-injection, owasp-a03]
     targets:
@@ -158,67 +158,25 @@ rules:
         - "POST"
         - "OPTIONS"
 
-  # ── 请求走私迹象 ────────────────────────────────────────────────────
-  # 这一对规则合起来才是"Content-Length 与 Transfer-Encoding 并存"。
-  # DSL 目前没有"A 头与 B 头同时存在"的直接表达，只能靠 chain：
-  # PROTO-1007 只在 PROTO-1006 命中后评估。分数按 4 + 1 分配，
-  # 这样单有 Transfer-Encoding（合法的分块上传）不会被拦，
-  # 两者并存才越过阈值 5。加载器若不实现 chain，PROTO-1007 会在每个
-  # 带 Content-Length 的请求上 +1 分 —— 只会变吵，不会误拦。
-  - id: PROTO-1006
-    phase: 1
-    severity: medium
-    category: protocol
-    score: 4
-    message: "请求携带 Transfer-Encoding（与 Content-Length 并存即为走私迹象）"
-    tags: [protocol, request-smuggling, http-desync]
-    targets:
-      - collection: REQUEST_HEADERS
-        selector: "transfer-encoding"
-    transforms:
-      - trim
-      - lowercase
-    operator:
-      name: pm
-      params:
-        patterns:
-          - "chunked"
-          - "identity"
-          - "compress"
-    action:
-      type: log
-    test:
-      positive:
-        - "chunked"
-        - "identity"
-      negative:
-        - ""
-        - "gzip"
-
-  - id: PROTO-1007
-    phase: 1
-    chain: true
-    severity: high
-    category: protocol
-    score: 1
-    message: "请求同时携带 Content-Length 与 Transfer-Encoding（CL.TE / TE.CL 走私）"
-    tags: [protocol, request-smuggling, http-desync]
-    targets:
-      - collection: REQUEST_HEADERS
-        selector: "content-length"
-    transforms:
-      - trim
-    operator:
-      name: regex
-      params:
-        pattern: "^[0-9]{1,12}$"
-    test:
-      positive:
-        - "42"
-        - "0"
-      negative:
-        - "chunked"
-        - "not-a-number"
+  # ---- 已移除：请求走私（CL.TE / TE.CL）检测 ----
+  #
+  # 这里原本是一对 chain 规则：PROTO-1006 命中 Transfer-Encoding，
+  # PROTO-1007 命中 Content-Length，两个都中即判走私。**它在本层不可能命中，
+  # 所以删掉而不是留着** —— 死规则比没有规则更糟，它会让人以为"我在防请求走私"。
+  #
+  # 实测证据（internal/parser/headers_test.go 把它钉成了测试）：
+  #   Go 的 net/http 在解析阶段就把 Transfer-Encoding 从 Header 里移走放进
+  #   r.TransferEncoding，并且在 chunked 时**连 Content-Length 一起删掉**
+  #   （ContentLength 变成 -1）。也就是说"CL 与 TE 同时存在"这件事
+  #   在 handler 层根本不可观测。
+  #
+  # 风险评估：不可观测 ≠ 可被利用。Go 的服务器与 httputil.ReverseProxy 会按
+  # 解析后的语义**重新编码**请求再发给上游，CL/TE 歧义不会传到后端。
+  # 也就是说这一层是"把歧义归一化掉"，而不是"把走私检测出来"。
+  # 要真正检测它，必须在 net/http 之前拦截原始字节（未实现，记在 docs/DESIGN.md §8）。
+  #
+  # 需要防的是 WAF 前面还有一层会自己解释 CL/TE 的代理（如老 nginx）时的
+  # "前端与 donothack 之间"的走私 —— 那属于部署拓扑问题，应当在文档里写明。
 
   - id: PROTO-1008
     phase: 1
@@ -233,10 +191,21 @@ rules:
     transforms:
       - trim
       - lowercase
+      - compressWhitespace
     operator:
-      name: regex
+      name: pm
       params:
-        pattern: "chunked[[:space:]]*,|,[[:space:]]*chunked|xchunked|chunked[[:space:]]*;|chunked[[:space:]]+=|\\x0bchunked|^[[:space:]]*chunked[[:space:]]+[0-9]"
+        patterns:
+          - "chunked,"
+          - "chunked ,"
+          - ",chunked"
+          - ", chunked"
+          - "xchunked"
+          - "chunked;"
+          - "chunked="
+          - "chunked ="
+          - "chunked \x0b"
+          - "\x0bchunked"
     test:
       positive:
         - "chunked, chunked"
@@ -269,7 +238,7 @@ rules:
         operator:
           name: regex
           params:
-            pattern: "^(?:gzip|deflate|br|zstd|identity)(?:[[:space:]]*,[[:space:]]*(?:gzip|deflate|br|zstd|identity))*$"
+            pattern: "^(?:gzip|deflate|br|zstd|identity)(?:\\s*,\\s*(?:gzip|deflate|br|zstd|identity))*$"
     action:
       type: log
     test:

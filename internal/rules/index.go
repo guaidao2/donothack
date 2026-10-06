@@ -33,7 +33,8 @@ func (rs *RuleSet) buildIndex(opts Options) error {
 		// 先收集本阶段启用的规则
 		var phaseRules []*CompiledRule
 		for _, r := range rs.allRules {
-			if r.Enabled && r.Phase == p {
+			// chainMember 只是链条成员，由链首统一执行，不单独进预筛与评估。
+			if r.Enabled && !r.chainMember && r.Phase == p {
 				phaseRules = append(phaseRules, r)
 			}
 		}

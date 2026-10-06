@@ -1,0 +1,22 @@
+POST /api/v1/attachments HTTP/1.1
+Host: app.example.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundaryQa9zXk2Lm4Tp
+Content-Length: 389
+
+------WebKitFormBoundaryQa9zXk2Lm4Tp
+Content-Disposition: form-data; name="file"; filename="quarterly-report-2024.pdf"
+Content-Type: application/pdf
+
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+trailer
+<< /Root 1 0 R >>
+%%EOF
+------WebKitFormBoundaryQa9zXk2Lm4Tp
+Content-Disposition: form-data; name="description"
+
+Q4 financial summary
+------WebKitFormBoundaryQa9zXk2Lm4Tp--

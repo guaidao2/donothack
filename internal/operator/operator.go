@@ -77,7 +77,73 @@ func Compile(name string, params kv.Params) (Compiled, error) {
 	return compileWith(name, params, &CompileCtx{})
 }
 
+// allowedParams 是每个算子接受的参数白名单。
+//
+// 存在的意义：规则作者把 `min_depth` 写成 `depth` 这类笔误时，
+// 如果实现只是"读不到就用默认值"，规则会**静默失效**（永远用默认阈值），
+// 而且没有任何报错 —— 这类问题在线上极难发现。所以加载期直接拒绝。
+var allowedParams = map[string][]string{
+	"eq":                   {"value"},
+	"equals":               {"value"},
+	"eqIgnoreCase":         {"value"},
+	"contains":             {"value"},
+	"containsAny":          {"values"},
+	"startsWith":           {"value"},
+	"endsWith":             {"value"},
+	"regex":                {"pattern", "capture"},
+	"regexCaseInsensitive": {"pattern", "capture"},
+	"pm":                   {"patterns", "match_all"},
+	"pmFromFile":           {"file", "match_all"},
+	"gt":                   {"value"},
+	"ge":                   {"value"},
+	"lt":                   {"value"},
+	"le":                   {"value"},
+	"within":               {"min", "max"},
+	"validateByteRange":    {"range"},
+	"ipMatch":              {"cidrs"},
+	"ipMatchFromFile":      {"file"},
+	"allOf":                {"operators", "operator"},
+	"anyOf":                {"operators", "operator"},
+	"not":                  {"operator"},
+	"unconditionalMatch":   {},
+	"detectSQLi":           {"min_fingerprint_len"},
+	"detectXSS":            {"min_fingerprint_len"},
+	"detectPathTraversal":  {"min_depth"},
+	"containsShellChars":   {},
+	"isWebshellContent":    {},
+	"entropy":              {"min_bits", "min_len"},
+	"luhn":                 {},
+}
+
+// checkParams 拒绝白名单之外的参数名。
+func checkParams(name string, p kv.Params) error {
+	allowed, known := allowedParams[name]
+	if !known || len(p) == 0 {
+		return nil
+	}
+	for k := range p {
+		found := false
+		for _, a := range allowed {
+			if k == a {
+				found = true
+				break
+			}
+		}
+		if !found {
+			if len(allowed) == 0 {
+				return fmt.Errorf("算子 %s 不接受任何参数，但传了 %q", name, k)
+			}
+			return fmt.Errorf("不认识的参数 %q；算子 %s 只接受：%s",
+				k, name, strings.Join(allowed, ", "))
+		}
+	}
+	return nil
+}
+
 func compileWith(name string, params kv.Params, cc *CompileCtx) (Compiled, error) {
+	if err := checkParams(name, params); err != nil {
+		return nil, fmt.Errorf("算子 %s 参数有误：%w", name, err)
+	}
 	c, ok := registry[name]
 	if !ok {
 		if s := Suggestion(name); s != "" {

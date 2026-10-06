@@ -237,6 +237,7 @@ func LoadFiles(opts Options, files []string) (*RuleSet, error) {
 		}
 
 		// 规则
+		fileStart := len(rs.allRules)
 		for i, yr := range doc.Rules {
 			ref := SourceRef{File: file, Index: i + 1}
 			cr, err := compileRule(opts, doc, yr, ref)
@@ -266,6 +267,8 @@ func LoadFiles(opts Options, files []string) (*RuleSet, error) {
 				rs.localities.Disabled++
 			}
 		}
+		// 链式规则只在**同一个文件内、连续排列**时成链，所以按文件成组。
+		linkChains(rs, fileStart, len(rs.allRules), errs)
 	}
 
 	if err := errs.Err(); err != nil {
@@ -590,10 +593,11 @@ func extractLiterals(r *CompiledRule, minLen int) ([][]byte, bool) {
 			lits = append(lits, []byte(v))
 		}
 	case "regex", "regexCaseInsensitive":
-		if re, err := regexp.Compile(params.String("pattern")); err == nil {
-			if prefix, _ := re.LiteralPrefix(); len(prefix) > 0 {
-				lits = append(lits, []byte(prefix))
-			}
+		// 用**最长字面量子串**而不是正则前缀：真实规则里的正则大多不以字面量
+		// 开头（\bunion\b…），只看前缀会让大量规则退化成每请求执行。
+		// 提取函数在 literal.go，保守优先 —— 提错会导致漏检。
+		if lit, ok := regexLiteralCandidateSafe(params.String("pattern"), 3); ok {
+			lits = append(lits, lit)
 		}
 	default:
 		// 语义算子不看字面量，必须每请求评估
@@ -627,4 +631,72 @@ func sortedKeys(m map[string]int) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// linkChains 把 chain: true 的规则与其后续成员绑定成一条逻辑规则。
+//
+// 语义按 ModSecurity（也是规则集作者按 docs/RULES.md 写的形态）：
+// 链首写 chain: true，成员依次跟到**第一个没有写 chain 的规则**为止。
+// 编译后：链首的 ChainMembers 非空，成员标 chainMember（不单独执行）。
+//
+// 这样"Content-Length 与 Transfer-Encoding 同时出现"这类判据只有两个条件
+// 都满足时才计分，而不是前半个条件在每个请求上加分。
+func linkChains(rs *RuleSet, from, to int, errs *Errors) {
+	i := from
+	for i < to {
+		head := rs.allRules[i]
+		if !head.Chain {
+			i++
+			continue
+		}
+		members := []*CompiledRule{head}
+		j := i + 1
+		for {
+			if j >= to {
+				errs.add("%s：规则 %s 写了 chain: true，但后面没有成员规则（链必须成对以上出现）",
+					head.Source, head.ID)
+				i = j
+				break
+			}
+			m := rs.allRules[j]
+			members = append(members, m)
+			if !m.Chain {
+				// 第一个没写 chain 的规则是链尾
+				break
+			}
+			j++
+		}
+		if len(members) < 2 {
+			if j < to {
+				i = j + 1
+			}
+			continue
+		}
+
+		// 一致性校验：同一个链条里所有成员必须在同一阶段；被禁用的成员会让链条永远不命中。
+		bad := false
+		for _, m := range members {
+			if m.Phase != head.Phase {
+				errs.add("%s：链式规则 %s 的成员 %s 阶段不同（%s vs %s），链必须同阶段",
+					head.Source, head.ID, m.ID, head.Phase, m.Phase)
+				bad = true
+			}
+			if !m.Enabled {
+				errs.add("%s：链式规则 %s 的成员 %s 被禁用，整条链永远不会命中；"+
+					"要停用请把链首一起禁用", head.Source, head.ID, m.ID)
+				bad = true
+			}
+		}
+		if bad {
+			i = j + 1
+			continue
+		}
+
+		head.ChainMembers = members
+		head.Chain = false // 编译期已消费，运行期按 ChainMembers 判断
+		for k := 1; k < len(members); k++ {
+			members[k].chainMember = true
+		}
+		i = j + 1
+	}
 }

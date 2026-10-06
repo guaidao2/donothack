@@ -1,0 +1,15 @@
+POST /api/v1/upload HTTP/1.1
+Host: app.example.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundaryQa9zXk2Lm4Tp
+Content-Length: 218
+
+------WebKitFormBoundaryQa9zXk2Lm4Tp
+Content-Disposition: form-data; name="file"; filename="avatar.php.jpg"
+Content-Type: image/jpeg
+
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog >>
+endobj
+------WebKitFormBoundaryQa9zXk2Lm4Tp--
