@@ -146,11 +146,17 @@ export function createRouter(opts) {
       listeners.add(fn);
       return () => listeners.delete(fn);
     },
+    /**
+     * 安装监听（只装一次）并解析当前地址。
+     * 注意：这里**每次都 resolve**——外壳重建（例如登出后重新登录）时会重新订阅，
+     * 若第二次 start() 直接 return，订阅者就永远收不到通知，页面会是空白的（实测踩过）。
+     */
     start() {
-      if (started) return current;
-      started = true;
-      document.addEventListener('click', onDocumentClick);
-      globalThis.addEventListener('popstate', resolve);
+      if (!started) {
+        started = true;
+        document.addEventListener('click', onDocumentClick);
+        globalThis.addEventListener('popstate', resolve);
+      }
       return resolve();
     },
     stop() {

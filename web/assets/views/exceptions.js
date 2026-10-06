@@ -93,7 +93,7 @@ function expiredBanner(items) {
 /* ── 例外规则 ───────────────────────────────────────────────── */
 
 function renderExceptionsTab(host, ctx) {
-  const state = { status: 'loading', data: null, error: null };
+  let state = { status: 'loading', data: null, error: null };
   const tableHost = el('div');
   const bannerHost = el('div');
   const filters = { state: '' };
@@ -265,7 +265,7 @@ function renderExceptionsTab(host, ctx) {
 /* ── IP 名单 ────────────────────────────────────────────────── */
 
 function renderIpListsTab(host) {
-  const state = { status: 'loading', data: null, error: null };
+  let state = { status: 'loading', data: null, error: null };
   const tableHost = el('div');
   const filters = { list: '' };
 

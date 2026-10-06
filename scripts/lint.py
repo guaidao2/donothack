@@ -110,6 +110,51 @@ def check_frontend_write_ban() -> bool:
     return True
 
 
+
+def check_embed_tracked() -> bool:
+    """`web/` 下的每个文件都必须在 git 里。
+
+    为什么单列这一条：前端是 `//go:embed all:web` 进二进制的，
+    而**构建读磁盘、交付读 git** —— 两者一旦不一致，本地跑得好好的，
+    克隆出来却是一个缺文件的控制台。真踩过：`index.html`、`app.js`、
+    `audit.js`、`settings.js` 四个文件（约 60 KB）一直没被 `git add` 进去，
+    因为提交时的 add 清单里漏了 `web/`。这种"本地能跑、交付是坏的"最伤，
+    而且不会自己暴露 —— 所以让它变成门禁的一步。
+
+    只查"磁盘有、git 没有"这一个方向：开发中的普通改动不该让门禁变红。
+
+    注意返回约定：与其它检查一致返回**裸 bool** 并自己打印细节。
+    写成 `return ok, detail` 会被 `step()` 当成真值 —— 那是个"永远通过"的门禁
+    （非空元组恒为真），这里已经踩过一次。
+    """
+    web = ROOT / "web"
+    if not web.is_dir():
+        print("  没有 web/ 目录，跳过")
+        return True
+
+    proc = run(["git", "ls-files", "web"], capture=True)
+    if proc.returncode != 0:
+        print("  不是 git 仓库，跳过")
+        return True
+    tracked = {line.strip().replace("\\", "/") for line in (proc.stdout or "").splitlines() if line.strip()}
+
+    missing = []
+    for f in sorted(web.rglob("*")):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(ROOT).as_posix()
+        if rel not in tracked:
+            missing.append(rel)
+
+    if missing:
+        shown = "、".join(missing[:6])
+        more = "" if len(missing) <= 6 else f" 等 {len(missing)} 个"
+        print(f"  web/ 下有 {len(missing)} 个文件不在 git 里：{shown}{more}")
+        print("  这些文件会被 go:embed 打进二进制，但克隆出来就没有 —— 提交前请 git add web/")
+        return False
+    print(f"  web/ 下 {len(tracked)} 个文件全部已跟踪")
+    return True
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="donothack 提交前门禁")
     parser.add_argument("--skip-tests", action="store_true", help="跳过 go test")
@@ -122,6 +167,7 @@ def main() -> int:
     if not args.skip_tests:
         checks.append(("go test", check_tests))
     checks.append(("控制台 DOM 写入禁令（innerHTML 等）", check_frontend_write_ban))
+    checks.append(("embed 目录一致性（web/ 必须全部进 git）", check_embed_tracked))
 
     failed = [name for name, fn in checks if not step(name, fn)]
 

@@ -86,6 +86,85 @@ function extractError(payload, status) {
   return new ApiError('HTTP ' + status, { code: ErrorCode.HTTP, status: status, payload: payload });
 }
 
+/** 统一的后置处理：401 通知、错误归一化、JSON / 文本解析。 */
+async function finalize(response, method, url, raw, opts) {
+  const skipUnauthorized = !!(opts && opts.skipUnauthorized);
+
+  if (response.status === 204 || response.status === 205) {
+    if (!response.ok) throw new ApiError('HTTP ' + response.status, { code: ErrorCode.HTTP, status: response.status });
+    return null;
+  }
+
+  const contentType = response.headers.get('content-type') || '';
+  let payload = null;
+  let text = '';
+  try {
+    if (!raw && contentType.indexOf('application/json') >= 0) {
+      payload = await response.json();
+    } else {
+      text = await response.text();
+      payload = text;
+      if (!raw && contentType.indexOf('application/json') >= 0) {
+        try {
+          payload = JSON.parse(text);
+        } catch (err) {
+          payload = text;
+        }
+      }
+    }
+  } catch (err) {
+    if (!response.ok) {
+      throw new ApiError('HTTP ' + response.status + '（响应体无法解析）', {
+        code: ErrorCode.BAD_RESPONSE,
+        status: response.status,
+      });
+    }
+    throw new ApiError('响应体不是合法 JSON', { code: ErrorCode.BAD_RESPONSE, status: response.status });
+  }
+
+  if (!response.ok) {
+    if (response.status === 401) {
+      const serverError = payload && typeof payload === 'object' ? payload.error : null;
+      // 登录接口的 401 是"凭据不对"，不是"会话过期"：不能触发全局未认证处理，
+      // 否则登录页会被整屏重绘成"会话已过期"，把行内错误提示冲掉（实测踩过）。
+      if (!skipUnauthorized) notifyUnauthorized();
+      if (serverError && serverError.code && serverError.code !== ErrorCode.UNAUTHENTICATED) {
+        throw new ApiError(serverError.message || '请求未通过认证', {
+          code: serverError.code,
+          status: 401,
+          detail: serverError.detail || '',
+          payload: payload,
+        });
+      }
+      throw new ApiError('需要认证：会话不存在或已过期', {
+        code: ErrorCode.UNAUTHENTICATED,
+        status: 401,
+        detail: '请重新登录控制台',
+        payload: payload,
+      });
+    }
+    if (response.status === 403) {
+      throw new ApiError((payload && payload.error && payload.error.message) || '被拒绝：缺少自定义头 / Origin 校验未通过', {
+        code: ErrorCode.FORBIDDEN,
+        status: 403,
+        detail: '写操作必须带 ' + CONSOLE_HEADER + ': 1，且 Origin 与站点一致',
+        payload: payload,
+      });
+    }
+    if (response.status === 404 || response.status === 501) {
+      throw new ApiError('后端尚未实现该端点（HTTP ' + response.status + '）', {
+        code: ErrorCode.NOT_FOUND,
+        status: response.status,
+        detail: method + ' ' + url,
+        payload: payload,
+      });
+    }
+    throw extractError(payload, response.status);
+  }
+
+  return payload;
+}
+
 /**
  * 底层请求。成功返回解析后的响应体（JSON 或文本）；失败抛 ApiError。
  * @param {string} path /api/v1 之后的路径，例如 '/status'
@@ -107,10 +186,10 @@ export async function request(path, opts = {}) {
     if (token) headers[CSRF_HEADER] = token;
   }
 
-  const url = API_BASE + path + buildQuery(opts.query);
+  const target = API_BASE + path + buildQuery(opts.query);
   let response;
   try {
-    response = await fetch(url, {
+    response = await fetch(target, {
       method: method,
       headers: headers,
       body: body,
@@ -126,66 +205,36 @@ export async function request(path, opts = {}) {
     });
   }
 
-  if (response.status === 401) {
-    notifyUnauthorized();
-    throw new ApiError('需要认证：会话不存在或已过期', {
-      code: ErrorCode.UNAUTHENTICATED,
-      status: 401,
-      detail: '请重新登录控制台',
-    });
-  }
+  return finalize(response, method, target, opts.raw, opts);
+}
 
-  if (response.status === 204 || response.status === 205) {
-    if (!response.ok) throw new ApiError('HTTP ' + response.status, { code: ErrorCode.HTTP, status: response.status });
-    return null;
-  }
+/**
+ * 表单（multipart/form-data）POST：仅用于文件上传类端点，例如 POST /restore。
+ * 自定义头与 CSRF 头照旧带上；Content-Type 交给浏览器自己带 boundary。
+ */
+export async function postForm(path, formData, opts = {}) {
+  const headers = { Accept: 'application/json' };
+  headers[CONSOLE_HEADER] = '1';
+  const token = csrfToken();
+  if (token) headers[CSRF_HEADER] = token;
 
-  const contentType = response.headers.get('content-type') || '';
-  let payload = null;
-  let text = '';
+  const target = API_BASE + path + buildQuery(opts.query);
+  let response;
   try {
-    if (!opts.raw && contentType.indexOf('application/json') >= 0) {
-      payload = await response.json();
-    } else {
-      text = await response.text();
-      payload = text;
-      if (!opts.raw && contentType.indexOf('application/json') >= 0) {
-        try {
-          payload = JSON.parse(text);
-        } catch (err) {
-          payload = text;
-        }
-      }
-    }
-  } catch (err) {
-    if (!response.ok) throw new ApiError('HTTP ' + response.status + '（响应体无法解析）', {
-      code: ErrorCode.BAD_RESPONSE,
-      status: response.status,
+    response = await fetch(target, {
+      method: 'POST',
+      headers: headers,
+      body: formData,
+      credentials: 'same-origin',
+      cache: 'no-store',
     });
-    throw new ApiError('响应体不是合法 JSON', { code: ErrorCode.BAD_RESPONSE, status: response.status });
+  } catch (err) {
+    throw new ApiError('无法连接控制台后端（' + (err && err.message ? err.message : '网络错误') + '）', {
+      code: ErrorCode.NETWORK,
+      status: 0,
+    });
   }
-
-  if (!response.ok) {
-    if (response.status === 403) {
-      throw new ApiError((payload && payload.error && payload.error.message) || '被拒绝：缺少自定义头 / Origin 校验未通过', {
-        code: ErrorCode.FORBIDDEN,
-        status: 403,
-        detail: '写操作必须带 ' + CONSOLE_HEADER + ': 1，且 Origin 与站点一致',
-        payload: payload,
-      });
-    }
-    if (response.status === 404 || response.status === 501) {
-      throw new ApiError('后端尚未实现该端点（HTTP ' + response.status + '）', {
-        code: ErrorCode.NOT_FOUND,
-        status: response.status,
-        detail: method + ' ' + url,
-        payload: payload,
-      });
-    }
-    throw extractError(payload, response.status);
-  }
-
-  return payload;
+  return finalize(response, 'POST', target, false, opts);
 }
 
 /** 写操作结果里的 warnings 统一取出来给界面提示。 */
@@ -228,7 +277,8 @@ export function backupUrl() {
 export const api = {
   /* 认证 */
   session: () => request('/session'),
-  login: (credentials) => request('/login', { method: 'POST', body: credentials }),
+  // 登录接口的 401 必须留在登录页里显示（skipUnauthorized），否则会被当成会话过期整屏重绘。
+  login: (credentials) => request('/login', { method: 'POST', body: credentials, skipUnauthorized: true }),
   logout: () => request('/logout', { method: 'POST' }),
   changePassword: (body) => request('/password', { method: 'POST', body: body }),
   enrollTotp: (body) => request('/totp/enroll', { method: 'POST', body: body || {} }),
@@ -281,7 +331,7 @@ export const api = {
   reloadConfig: () => request('/config/reload', { method: 'POST' }),
 
   /* 备份与通知 */
-  restore: (body) => request('/restore', { method: 'POST', body: body }),
+  restore: (formData, opts) => postForm('/restore', formData, opts),
   notify: () => request('/notify'),
   putNotify: (body) => request('/notify', { method: 'PUT', body: body }),
   testNotify: (body) => request('/notify/test', { method: 'POST', body: body || {} }),

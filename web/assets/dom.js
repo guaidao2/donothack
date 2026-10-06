@@ -557,14 +557,25 @@ export function field(label, control, hint) {
   );
 }
 
+let fieldSeq = 0;
+
+/** 表单控件统一补 id/name：既是语义要求，也让浏览器 a11y 审计不再报警。 */
+function fieldIdentity(opts) {
+  const seq = (fieldSeq += 1);
+  const name = opts.name || 'dh-field-' + seq;
+  return { name: name, id: opts.id || name };
+}
+
 export function textInput(opts = {}) {
+  const identity = fieldIdentity(opts);
   const attrs = {
     type: opts.type || 'text',
     placeholder: opts.placeholder || '',
     autocomplete: opts.autocomplete || 'off',
     spellcheck: 'false',
+    name: identity.name,
+    id: identity.id,
   };
-  if (opts.name) attrs.name = opts.name;
   const node = el('input', { attrs: attrs, class: opts.class });
   if (opts.value !== undefined && opts.value !== null) node.value = String(opts.value);
   if (opts.disabled) node.disabled = true;
@@ -579,14 +590,24 @@ export function textInput(opts = {}) {
 }
 
 export function textArea(opts = {}) {
-  const node = el('textarea', { attrs: { rows: String(opts.rows || 8), spellcheck: 'false', placeholder: opts.placeholder || '' } });
+  const identity = fieldIdentity(opts);
+  const node = el('textarea', {
+    attrs: {
+      rows: String(opts.rows || 8),
+      spellcheck: 'false',
+      placeholder: opts.placeholder || '',
+      name: identity.name,
+      id: identity.id,
+    },
+  });
   if (opts.value) node.value = String(opts.value);
   if (opts.onInput) node.addEventListener('input', () => opts.onInput(node.value, node));
   return node;
 }
 
 export function selectInput(options, opts = {}) {
-  const node = el('select', {});
+  const identity = fieldIdentity(opts);
+  const node = el('select', { attrs: { name: identity.name, id: identity.id } });
   if (opts.disabled) node.disabled = true;
   for (const option of options || []) {
     const value = typeof option === 'string' ? option : option.value;
@@ -601,11 +622,17 @@ export function selectInput(options, opts = {}) {
 }
 
 export function checkbox(labelText, opts = {}) {
-  const box = el('input', { attrs: { type: 'checkbox' } });
+  const identity = fieldIdentity(opts);
+  const box = el('input', { attrs: { type: 'checkbox', name: identity.name, id: identity.id } });
   box.checked = !!opts.checked;
   if (opts.disabled) box.disabled = true;
   if (opts.onChange) box.addEventListener('change', () => opts.onChange(box.checked));
-  return el('label', { class: 'field field--inline' }, box, el('span', { text: labelText }));
+  return el(
+    'label',
+    { class: 'field field--inline', attrs: { for: identity.id } },
+    box,
+    el('span', { text: labelText })
+  );
 }
 
 /* ── 四种状态 ───────────────────────────────────────────────── */

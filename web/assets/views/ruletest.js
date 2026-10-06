@@ -16,6 +16,7 @@ import {
   renderCode,
   selectInput,
   textArea,
+  mount,
   pick,
   asArray,
   fmtScore,
@@ -225,12 +226,13 @@ export function render(container) {
     }
     busy = true;
     runButton.disabled = true;
-    resultHost.replaceChildren(loadingBlock('后端正在跑完整链路…'));
+    mount(resultHost, loadingBlock('后端正在跑完整链路…'));
     try {
       const payload = await api.testRule({ raw: text, format: modeSelect.value });
-      resultHost.replaceChildren(resultBody(payload || {}));
+      mount(resultHost, resultBody(payload || {}));
     } catch (err) {
-      resultHost.replaceChildren(
+      mount(
+        resultHost,
         errorState(err, {
           title: '测试失败',
           hint:
