@@ -183,7 +183,7 @@ type Mutation interface {
 
 - payload 一律写进 `<pre><code>`，并且**只通过 `textContent` 赋值**，永不经过 `innerHTML`。
 - 前端封装唯一原语 `renderCode(text)`：`document.createElement('pre')` + `code.textContent = text`。**所有** payload 展示必须走它，不允许各页面自己拼。
-- **全前端禁用** `innerHTML` / `outerHTML` / `insertAdjacentHTML` / `document.write` / `eval` / `new Function`，用 CI 的 grep 门禁卡死（`scripts/lint-no-innerhtml.ps1`）。门禁比文档约定可靠 —— 约定会被人忘，门禁不会。
+- **全前端禁用** `innerHTML` / `outerHTML` / `insertAdjacentHTML` / `document.write` / `eval` / `new Function`，用 CI 的 grep 门禁卡死（`scripts/lint.py`）。门禁比文档约定可靠 —— 约定会被人忘，门禁不会。
 - **不引第三方 markdown 库**。视图结构用自研的极小 markdown 子集渲染器（只支持代码块、表格、粗体、换行），**不支持链接、图片、raw HTML**；代码块内容强制走 `renderCode`。
 - payload 文本在**服务端先做可打印化**：控制字符与不可打印字节转 `\xNN`，按 UTF-8 边界截断（默认 4 KiB），并标注是否被截断。这样即使前端出问题，文本里也没有可执行的东西。
 - **双层防护**：服务端可打印化 + 前端 `textContent`。任一层失效都不会导致执行。
@@ -374,7 +374,7 @@ web/
 - **原生 ES module**：浏览器直接 `import`，不需要打包器。所有文件走 `go:embed`，由 Go 静态文件服务发出，MIME 类型正确即可。
 - **无 TypeScript、无 JSX**：视图用模板字面量 + 一个 `dom.js` helper（插值走 `textContent`，不做字符串拼 HTML）。
 - **不用框架**：状态管理手写约 80 行（对象 + 订阅 + 重渲染），SPA 复杂度在这个规模下不值得引框架。
-- **`innerHTML` 全面禁用**：所有 DOM 写入只走 `createElement` + `textContent`。payload 走 `renderCode`（见 §3.4），结构文本走 `md.js`。CI 门禁 `scripts/lint-no-innerhtml.ps1` grep 全前端源码，命中即失败；开发模式下 `safe.js` 把 `innerHTML` 改写成抛错，本地一跑就炸，不用等 CI。
+- **`innerHTML` 全面禁用**：所有 DOM 写入只走 `createElement` + `textContent`。payload 走 `renderCode`（见 §3.4），结构文本走 `md.js`。CI 门禁 `scripts/lint.py` grep 全前端源码，命中即失败；开发模式下 `safe.js` 把 `innerHTML` 改写成抛错，本地一跑就炸，不用等 CI。
 - **markdown 只用于"结构"，不用于"内容"**：`md.js` 只支持代码块、表格、粗体、换行四种子集，不支持链接、图片、raw HTML、内联事件。代码块内容强制 `textContent`。**不引任何第三方 markdown 库** —— 引进来就等于把渲染器的 XSS 面一起引进控制台。
 - **图表用 uPlot**（40KB，无依赖，性能好，低配浏览器也不卡）。
 - **路由**：门槛路径前缀下全部回落到 `index.html`；`/api/v1/*` 走 API。
