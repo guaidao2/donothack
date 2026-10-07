@@ -142,6 +142,7 @@ func DefaultCategories() map[string]int {
 		"sqli":     5,
 		"xss":      5,
 		"rce":      5,
+		"ssti":     5,
 		"lfi":      5,
 		"rfi":      5,
 		"webshell": 5,

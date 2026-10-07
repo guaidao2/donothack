@@ -2,7 +2,7 @@ version: 1
 meta:
   name: "SSTI 服务端模板注入"
   author: "donothack"
-  category: rce
+  category: ssti
 
 # 为什么单独一个文件：这是 P6 验收（crackweb 打靶场）暴露出的缺口 ——
 # 原先 59 条规则里**没有 SSTI**，`{{1999*1999}}` 这种表达式注入直接穿过。
@@ -22,7 +22,7 @@ rules:
   - id: SSTI-3001
     phase: 2
     severity: critical
-    category: rce
+    category: ssti
     score: 5
     message: "服务端模板注入：表达式在参数里被求值（{{7*7}} / ${7*7} 形态）"
     tags: [ssti, rce, owasp-a03, injection, template]

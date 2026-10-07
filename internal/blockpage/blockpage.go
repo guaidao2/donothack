@@ -76,6 +76,7 @@ type Data struct {
 // 给终端用户看的页面**不暴露具体规则 ID 与正则**：那等于免费告诉攻击者
 // 哪条规则命中、怎么绕。只给类目级别的说明，足够让正常用户明白"为什么被拦"。
 var categoryLabels = map[string]string{
+	"ssti":      "服务端模板注入",
 	"sqli":      "SQL 注入",
 	"xss":       "跨站脚本",
 	"rce":       "远程命令执行",
