@@ -12,6 +12,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"donothack/internal/rulessync"
 	"flag"
 	"fmt"
 	"io"
@@ -613,7 +614,55 @@ func rulesetSummary(rs *rules.RuleSet) string {
 
 // ---------------------------------------------------------------- rules check / test
 
+// runRulesSyncCmd 手动同步规则集：取回 → 校验 → 替换。
+//
+// 只改本机规则目录，不碰正在运行的进程 —— 生效方式见命令输出的提示
+// （调用 POST /api/v1/rulesets/reload，或重启）。
+func runRulesSyncCmd(args []string) int {
+	fs := flag.NewFlagSet("rules sync", flag.ExitOnError)
+	dir := fs.String("d", "./rules", "规则目录")
+	source := fs.String("source", "", "目录清单地址（留空用内置默认）")
+	ref := fs.String("ref", "", "版本（tag/分支/commit；留空取最新发布 tag）")
+	_ = fs.Parse(args)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	hc := &http.Client{Timeout: 60 * time.Second}
+
+	src := rulessync.Source{BaseURL: *source, Ref: *ref}
+	if strings.TrimSpace(*ref) == "" {
+		if tag, err := rulessync.LatestTag(ctx, hc, *source); err == nil {
+			src.Ref = tag
+			fmt.Printf("同步目标：最新发布 %s\n", tag)
+		} else {
+			fmt.Printf("取最新发布 tag 失败（%v），改用默认分支\n", err)
+		}
+	}
+	files, listURL, err := rulessync.Fetch(ctx, src, hc)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "取规则集失败：%v\n", err)
+		return 1
+	}
+	fmt.Printf("来源：%s\n取回 %d 个文件\n", listURL, len(files))
+
+	res, err := rulessync.Apply(*dir, files)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "规则集未通过校验，本机未改动：\n%v\n", err)
+		return 1
+	}
+	if res.Skipped {
+		fmt.Printf("已是最新规则集（%s），未做替换\n", res.FromVersion)
+		return 0
+	}
+	fmt.Printf("规则集已更新：%s → %s\n", res.FromVersion, res.ToVersion)
+	fmt.Printf("生效方式：POST /api/v1/rulesets/reload（或重启进程）\n")
+	return 0
+}
+
 func runRulesCmd(args []string) int {
+	if len(args) > 0 && args[0] == "sync" {
+		return runRulesSyncCmd(args[1:])
+	}
 	fs := flag.NewFlagSet("rules check", flag.ExitOnError)
 	dir := fs.String("d", "./rules", "规则目录")
 	selfTest := fs.Bool("self-test", true, "是否跑规则自带的正负样本")

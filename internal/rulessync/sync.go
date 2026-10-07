@@ -256,3 +256,40 @@ func get(ctx context.Context, hc *http.Client, url string) ([]byte, error) {
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, maxFileBytes))
 }
+
+// LatestTag 从目录清单地址推断仓库，取"最新发布"的 tag。
+//
+// 为什么默认跟发布而不是默认分支：默认分支上随时可能是半成品提交，
+// 而 tag 是发布前跑过规则自测、语料与门禁的那个状态。
+// 推不出仓库（例如指向内网镜像）或请求失败都返回错误，调用方退回默认分支。
+func LatestTag(ctx context.Context, hc *http.Client, contentsURL string) (string, error) {
+	base := strings.TrimSpace(contentsURL)
+	if base == "" {
+		base = DefaultSource
+	}
+	i := strings.Index(base, "/repos/")
+	if i < 0 {
+		return "", fmt.Errorf("地址里没有 /repos/，无法推断仓库")
+	}
+	parts := strings.Split(base[i+len("/repos/"):], "/")
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return "", fmt.Errorf("地址里缺少 owner/repo")
+	}
+	if hc == nil {
+		hc = &http.Client{Timeout: 30 * time.Second}
+	}
+	body, err := get(ctx, hc, "https://api.github.com/repos/"+parts[0]+"/"+parts[1]+"/releases/latest")
+	if err != nil {
+		return "", err
+	}
+	var rel struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.Unmarshal(body, &rel); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(rel.TagName) == "" {
+		return "", fmt.Errorf("最新发布里没有 tag_name")
+	}
+	return rel.TagName, nil
+}

@@ -315,6 +315,8 @@ export const api = {
   testRule: (body) => request('/rules/test', { method: 'POST', body: body }),
   rulesets: () => request('/rulesets'),
   reloadRulesets: () => request('/rulesets/reload', { method: 'POST' }),
+  rulesSyncStatus: () => request('/rules/sync'),
+  rulesSync: () => request('/rules/sync', { method: 'POST' }),
   previewMutation: (body) => request('/rulesets/preview', { method: 'POST', body: body }),
 
   /* 例外与名单 */

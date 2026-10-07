@@ -200,6 +200,7 @@ func (s *Server) routes() {
 	h("/api/v1/rules/validate", s.handleRulesValidate)
 	h("/api/v1/rules/test", s.handleRulesTest)
 	h("/api/v1/rulesets/reload", s.handleRulesReload)
+	h("/api/v1/rules/sync", s.handleRulesSync)
 	h("/api/v1/rulesets/preview", s.handleRulesPreview)
 	h("/api/v1/rulesets", s.handleRuleSets)
 

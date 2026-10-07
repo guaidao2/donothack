@@ -455,7 +455,25 @@ export function render(container, ctx) {
           el('div', { class: 'field' }, el('span', { class: 'field__label', text: '严重度' }), selectInput(SEVERITY_OPTIONS, { value: filters.severity, onChange: (v) => { filters.severity = v; load(); } })),
           el('div', { class: 'field' }, el('span', { class: 'field__label', text: '状态' }), selectInput(ENABLED_OPTIONS, { value: filters.enabled, onChange: (v) => { filters.enabled = v; load(); } })),
           el('div', { class: 'field' }, el('span', { class: 'field__label', text: '来源文件' }), textInput({ value: filters.file, placeholder: '按文件过滤', onInput: (v) => { filters.file = v; }, onEnter: (v) => { filters.file = v; load(); } })),
-          button('查询', { size: 'sm', tone: 'primary', onClick: () => load() })
+          button('查询', { size: 'sm', tone: 'primary', onClick: () => load() }),
+        button('同步规则', {
+          size: 'sm',
+          onClick: async () => {
+            // 手动同步：从配置的源（默认取最新发布 tag）拉规则，先自测通过才替换。
+            // 失败必须说出来 —— 否则界面看着正常、其实还在用旧规则。
+            try {
+              const res = await api.rulesSync();
+              const warn = asArray(pick(res || {}, ['warnings'], []))[0];
+              notify.info(warn ? String(warn) : '规则集已同步');
+              load();
+            } catch (err) {
+              notify.error('规则同步失败（本机规则未改动）', {
+                detail: String(err && err.message ? err.message : err),
+                timeout: 0,
+              });
+            }
+          },
+        })
         ),
         tableHost,
       ],

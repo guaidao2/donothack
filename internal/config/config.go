@@ -290,8 +290,13 @@ type EngineConfig struct {
 
 // RulesConfig 是规则集配置。
 type RulesConfig struct {
-	Dir            string   `yaml:"dir"`
-	Files          []string `yaml:"files"`
+	Dir   string   `yaml:"dir"`
+	Files []string `yaml:"files"`
+	// SyncSource 是手动同步时的目录清单地址（GitHub contents API 或同形状镜像）。
+	SyncSource string `yaml:"sync_source"`
+	// SyncRef 是版本选择（tag / 分支 / commit）。留空表示取**最新发布 tag**，
+	// 而不是默认分支 —— 默认分支上随时可能是半成品提交。
+	SyncRef        string   `yaml:"sync_ref"`
 	ReloadInterval Duration `yaml:"reload_interval"`
 	SelfTest       bool     `yaml:"self_test"`
 }
@@ -466,6 +471,7 @@ func Default() *Config {
 			Files:          []string{"*.yaml"},
 			ReloadInterval: 0,
 			SelfTest:       true,
+			SyncSource:     "https://api.github.com/repos/guaidao2/donothack/contents/rules",
 		},
 		Limits: LimitsConfig{
 			// 与档位相关的上限由 ApplyProfile 填充；其余是全局默认值。
