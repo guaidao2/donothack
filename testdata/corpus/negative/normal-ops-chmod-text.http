@@ -1,0 +1,7 @@
+POST /ticket HTTP/1.1
+Host: support.example.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 46
+
+note=please%20run%20chmod%20777%20on%20uploads

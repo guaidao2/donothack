@@ -4,6 +4,22 @@
 
 ## 未发布
 
+**按"出现即攻击"重划 RCE 的分值线**
+
+- 新增 `RCE-6013`（critical，5 分，单独就能拦）：反弹 shell 与下载执行的**专用命令行形态** ——
+  `/dev/tcp/`、`bash -i >&`、`nc -e /bin`、`mkfifo /tmp`、`socat tcp-connect`、`base64 -d | sh`、
+  `certutil -urlcache`、`bitsadmin /transfer`、`mshta`、`rundll32 javascript`、
+  `wmic process call create`、`powershell -enc`。
+- `RCE-6004/6005/6006` **保持 4 分**：它们的字面量里混着大量双用途串 ——
+  `chmod 777`、`systemctl enable`、`authorized_keys`、`openssl s_client -connect`、`nc -lvp`、
+  `python -c`、`ipconfig /all`、`tasklist /v`、`whoami /all` —— 这些出现在帮助台工单、
+  运维文档、配置表单里的概率很高，整条提到 5 分等于拿误报换覆盖。
+- 实测分界：反弹 shell / 下载执行形态 9–22 分（拦）；上面那些双用途串一律 4 分（只记分）；
+  正常业务 0 分（放行）。
+- 语料补 4 条：反弹 shell、certutil 下载（拦）；chmod / systemctl 的运维文案（放行，
+  同时是"误报旅行线"—— 将来若有人把 6005 提到 5 分，这两条会立刻变红）。
+
+
 **修掉路径等价写法导致的绕过（LFI 与命令注入同属一类）**
 
 - `/etc//passwd`、`/etc/./passwd`、`/etc/foo/../passwd`、`%2f` 编码斜杠、
