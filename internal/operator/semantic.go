@@ -617,11 +617,36 @@ func (o pathTraversalOp) Eval(_ *EvalCtx, in []byte) (Result, error) {
 
 type shellCharsOp struct{}
 
+// shellCommands 是"分隔符后面出现就立案"的命令名表。
+//
+// 这份表**不可能列全**（第三方测评指出过：`;pwd`、`;echo`、`;w` 以前都不在表里），
+// 所以它的定位是"高置信度信号"，不是唯一判据：
+//   - 表里的命令 + 分隔符 → 直接拦（RCE-6001/6003）；
+//   - 表外的词 + 分隔符 + 路径/参数 → 结构判定兜底（RCE-6017，记分叠加）。
+//
+// 新命令往这里加就行，不要再靠一条条加规则。
 var shellCommands = []string{
-	"id", "whoami", "cat", "ls", "dir", "ping", "nslookup", "wget", "curl",
-	"bash", "sh", "cmd", "powershell", "nc", "ncat", "nmap", "python", "python3",
-	"perl", "ruby", "php", "touch", "rm", "cp", "mv", "chmod", "chown", "kill",
-	"uname", "ifconfig", "ipconfig", "netstat", "ps", "tasklist", "systeminfo",
+	// 信息收集
+	"id", "whoami", "uname", "hostname", "w", "who", "ps", "pwd", "env", "printenv",
+	"date", "uptime", "last", "lastlog", "df", "du", "free", "top", "lsof", "ss",
+	"ifconfig", "ipconfig", "ip", "arp", "route", "netstat", "systeminfo", "tasklist",
+	"nslookup", "dig", "host", "ping", "traceroute", "tracert", "nmap", "nc", "ncat",
+	"telnet", "ftp", "ssh", "scp", "rsync", "curl", "wget",
+	// 文件与内容
+	"cat", "tac", "head", "tail", "more", "less", "ls", "dir", "find", "locate",
+	"grep", "egrep", "fgrep", "awk", "sed", "cut", "sort", "uniq", "wc", "strings",
+	"xxd", "od", "base64", "md5sum", "sha1sum", "sha256sum", "cp", "mv", "rm",
+	"mkdir", "rmdir", "touch", "ln", "chmod", "chown", "chgrp", "tar", "zip", "unzip",
+	"gzip", "gunzip", "bzip2", "7z", "rsync",
+	// 执行与解释器
+	"sh", "bash", "dash", "zsh", "ksh", "csh", "ash", "busybox", "python", "python3",
+	"perl", "ruby", "php", "node", "nodejs", "lua", "java", "gcc", "g++", "make",
+	"cmd", "cmd.exe", "powershell", "pwsh", "cscript", "wscript", "mshta", "rundll32",
+	"regsvr32", "certutil", "bitsadmin", "wmic", "schtasks", "reg", "net", "sc",
+	// 进程与服务控制
+	"kill", "killall", "pkill", "sudo", "su", "systemctl", "service", "crontab", "at",
+	"mount", "umount", "insmod", "modprobe", "docker", "kubectl", "git", "vim", "vi",
+	"nano", "emacs", "echo", "printf", "tee", "xargs", "eval", "exec", "source", "export",
 }
 
 // shellArgFollows 判断命令名后面是不是"真的到了命令边界"，
@@ -631,7 +656,9 @@ func shellArgFollows(after string) bool {
 		return true
 	}
 	switch after[0] {
-	case ' ', '\t', '-', ';', '|', '&', '\n', '\r':
+	// `+` 也算：它在前端/后端的表单与 Cookie 解码里代表空格
+	// （PHP 的 urldecode 就解 `+`），所以 `;cat+/etc/passwd` 在 Cookie/头里是成立的分隔。
+	case ' ', '\t', '+', '-', ';', '|', '&', '\n', '\r':
 		return true
 	}
 	return false
@@ -651,7 +678,7 @@ func looksLikeCommandLine(after string) bool {
 	case ';', '|', '&':
 		return true
 	}
-	arg := strings.TrimLeft(after, " \t")
+	arg := strings.TrimLeft(after, " \t+")
 	if arg == "" {
 		return true
 	}

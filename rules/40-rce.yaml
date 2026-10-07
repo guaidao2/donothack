@@ -21,7 +21,12 @@ rules:
     phase: 2
     severity: high
     category: rce
-    score: 4
+    score: 5
+    # 5 分（独立拦）：分隔符 + 命令名是命令注入的签名形态。
+    # 以前给 4 分是担心误报，但第三方测评点破了要害 —— 枚举命令名挡不住"类"：
+    # `;pwd`、`;echo`、`;w` 当时既不在表里、也不够阈值。现在词表扩全，
+    # 自然文本仍由 looksLikeCommandLine / shellArgFollows 的收紧条件挡住
+    # （多行文本里"某行以 cat 开头"不会立案）。
     message: "命令注入迹象：shell 特征字符与结构（containsShellChars）"
     tags: [rce, owasp-a03, cmdi, semantic]
     # targets 里为什么要带 REQUEST_URI：
@@ -135,7 +140,7 @@ rules:
     operator:
       name: regex
       params:
-        pattern: '[;&|]{1,2}\s*(?:cat|ls|dir|type)\s+[$/~.\-\x22\x27]|[;&|]{1,2}\s*(?:wget|curl)\s+https?://|[;&|]{1,2}\s*(?:whoami|uname|hostname|ifconfig|ipconfig|netstat|tasklist|systeminfo|nslookup|ping|nmap|nc|ncat|bash|sh|cmd|powershell|python|perl|ruby|php|chmod|chown|mkfifo|rm|cp|mv|kill)\b|[;&|]{1,2}\s*id\s*(?:$|[;&|])'
+        pattern: '[;&|]{1,2}[\s+]*(?:cat|tac|head|tail|more|less|ls|dir|find|locate|grep|egrep|fgrep|awk|sed|cut|sort|uniq|wc|strings|xxd|od|base64|md5sum|sha1sum|sha256sum|cp|mv|rm|mkdir|rmdir|touch|ln|chmod|chown|chgrp|tar|zip|unzip|gzip|gunzip|id|whoami|uname|hostname|w|who|ps|pwd|env|printenv|date|uptime|last|df|du|free|top|lsof|ss|ifconfig|ipconfig|ip|arp|route|netstat|systeminfo|tasklist|nslookup|dig|host|ping|traceroute|tracert|nmap|nc|ncat|telnet|ftp|ssh|scp|rsync|curl|wget|sh|bash|dash|zsh|ksh|csh|ash|busybox|python|python3|perl|ruby|php|node|nodejs|lua|java|gcc|make|cmd|powershell|pwsh|cscript|wscript|mshta|rundll32|regsvr32|certutil|bitsadmin|wmic|schtasks|reg|net|sc|kill|killall|pkill|sudo|su|systemctl|service|crontab|at|mount|umount|insmod|modprobe|docker|kubectl|git|vim|vi|nano|echo|printf|tee|xargs|eval|exec|source|export)[\s+]+[$/~.\-\x22\x27]|[;&|]{1,2}[\s+]*(?:wget|curl)[\s+]+https?://|[;&|]{1,2}[\s+]*(?:whoami|uname|hostname|ifconfig|ipconfig|netstat|tasklist|systeminfo|nslookup|ping|nmap|nc|ncat|bash|sh|cmd|powershell|python|perl|ruby|php|chmod|chown|mkfifo|rm|cp|mv|kill)\b|[;&|]{1,2}[\s+]*id[\s+]*(?:$|[;&|])'
     test:
       positive:
         - "; cat /etc/passwd"
@@ -703,6 +708,44 @@ rules:
         - "the serializer handles JSON payloads"
         - "please format the output as JSON"
         - "our .NET service runs on Windows"
+
+  # 结构判定：**不依赖命令词表** —— 分隔符后面跟一个词，再跟路径或选项，
+  # 这种"命令 + 参数"的形状在正常业务输入里几乎不出现。
+  # 定位是兜底：词表里的命令由 6001/6003 直接拦（5 分），表外的走这条记分，
+  # 与 LFI/RCE 的其它信号叠加后过阈值。第三方测评的原话：
+  # "它是在枚举命令名，而不是判'这里有个命令'" —— 这条就是那个判据。
+  - id: RCE-6017
+    phase: 2
+    severity: high
+    category: rce
+    score: 4
+    message: "命令注入迹象：分隔符后出现命令与参数的形状（不看命令名）"
+    tags: [rce, owasp-a03, cmdi, structural]
+    targets:
+      - collection: ARGS
+      - collection: REQUEST_BODY
+      - collection: REQUEST_URI
+      - collection: REQUEST_HEADERS
+      - collection: REQUEST_COOKIES
+    transforms:
+      - urlDecode
+      - urlDecode
+      - normalizeIFS
+      - compressWhitespace
+      - lowercase
+    operator:
+      name: regex
+      params:
+        pattern: '[;&|]{1,2}[\s+]*[a-z0-9_][a-z0-9_.\-]{0,24}[\s+]+(?:-{1,2}[a-z]|/|\.\./|\$\()'
+    test:
+      positive:
+        - ";mytool -x /tmp/a"
+        - "|somebin /etc/passwd"
+        - ";custom-tool --exec"
+      negative:
+        - "Cats; dogs and birds"
+        - "the total is 3; select the option"
+        - "Separator: A | B | C"
 
   - id: RCE-6012
     phase: 2

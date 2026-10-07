@@ -1,0 +1,6 @@
+GET / HTTP/1.1
+Host: app.example.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)
+Cookie: security=<script>alert(1)</script>
+Content-Length: 0
+
