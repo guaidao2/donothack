@@ -78,6 +78,12 @@ rules:
   reload_interval: 0s            # 0 = 只靠 SIGHUP 或控制面 API 触发
   self_test: true                # 加载前跑内置正负语料，不过就整批拒绝
 
+  # 手动同步用的目录清单地址（GitHub contents API 或同形状的内网镜像）。
+  # 同步只在你按下按钮/敲命令时发生，不做定时拉取。
+  sync_source: "https://api.github.com/repos/guaidao2/donothack/contents/rules"
+  # 版本选择（tag / 分支 / commit）。留空表示取**最新发布 tag**，
+  # 而不是默认分支 —— 默认分支上随时可能是半成品提交。
+  sync_ref: ""
 # 只写需要偏离档位默认值的项
 limits:
   max_uri_length: 8192
