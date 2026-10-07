@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"donothack/internal/rules"
@@ -161,5 +162,28 @@ func TestFetchRejectsBadInput(t *testing.T) {
 	defer srv.Close()
 	if _, _, err := Fetch(context.Background(), Source{BaseURL: srv.URL + "/list"}, srv.Client()); err == nil {
 		t.Fatal("清单里没有 .yaml 时必须报错（不能当成空集合同步下去）")
+	}
+}
+
+// 空 Ref 必须直接打默认分支（URL 不带 ?ref=）—— 默认要的是"最新规则"，
+// 不带任何版本参数才是仓库默认分支上的当前内容。
+func TestFetchDefaultsToDefaultBranch(t *testing.T) {
+	srv := fakeRemote(t, map[string][]byte{"60-webshell.yaml": realRule(t, "60-webshell.yaml")}, false)
+	defer srv.Close()
+
+	_, listURL, err := Fetch(context.Background(), Source{BaseURL: srv.URL + "/list"}, srv.Client())
+	if err != nil {
+		t.Fatalf("Fetch 失败：%v", err)
+	}
+	if strings.Contains(listURL, "ref=") {
+		t.Fatalf("空 Ref 时不应带版本参数（应取默认分支）：%s", listURL)
+	}
+
+	_, pinned, err := Fetch(context.Background(), Source{BaseURL: srv.URL + "/list", Ref: "v9.9.9"}, srv.Client())
+	if err != nil {
+		t.Fatalf("Fetch 失败：%v", err)
+	}
+	if !strings.Contains(pinned, "ref=v9.9.9") {
+		t.Fatalf("显式 Ref 时必须带上版本参数：%s", pinned)
 	}
 }

@@ -631,12 +631,7 @@ func runRulesSyncCmd(args []string) int {
 
 	src := rulessync.Source{BaseURL: *source, Ref: *ref}
 	if strings.TrimSpace(*ref) == "" {
-		if tag, err := rulessync.LatestTag(ctx, hc, *source); err == nil {
-			src.Ref = tag
-			fmt.Printf("同步目标：最新 tag %s\n", tag)
-		} else {
-			fmt.Printf("取最新 tag 失败（%v），改用默认分支\n", err)
-		}
+		fmt.Printf("同步目标：%s 的默认分支（最新规则）\n", firstNonEmpty(*source, rulessync.DefaultSource))
 	}
 	files, listURL, err := rulessync.Fetch(ctx, src, hc)
 	if err != nil {

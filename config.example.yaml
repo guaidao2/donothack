@@ -81,8 +81,8 @@ rules:
   # 手动同步用的目录清单地址（GitHub contents API 或同形状的内网镜像）。
   # 同步只在你按下按钮/敲命令时发生，不做定时拉取。
   sync_source: "https://api.github.com/repos/guaidao2/donothack/contents/rules"
-  # 版本选择（tag / 分支 / commit）。留空表示取**仓库最新 tag**，
-  # 而不是默认分支 —— 默认分支上随时可能是半成品提交。
+  # 版本选择（tag / 分支 / commit）。留空 = 默认分支上的**最新规则**（应急取最新，
+  # 不用等发布）；只在需要复现某个确定状态时才显式钉 tag。
   sync_ref: ""
 # 只写需要偏离档位默认值的项
 limits:

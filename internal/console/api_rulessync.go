@@ -102,13 +102,9 @@ func (s *Server) runRulesSync(w http.ResponseWriter, r *http.Request) {
 
 	src := rulessync.Source{BaseURL: report.Source, Ref: report.Ref}
 	hc := &http.Client{Timeout: 60 * time.Second}
-	if report.Ref == "" {
-		// 默认跟"最新发布"而不是默认分支：默认分支上随时可能是半成品提交。
-		if tag, err := rulessync.LatestTag(ctx, hc, report.Source); err == nil {
-			src.Ref = tag
-			report.Ref = tag
-		}
-	}
+	// Ref 留空时直接跟默认分支 —— 要的就是"最新规则"。
+	// 应急场景里规则是修完就推的，等打 tag/发 Release 会白白拖一段时间，
+	// 而这段时间里绕过一直可用。
 	files, listURL, err := rulessync.Fetch(ctx, src, hc)
 	if err != nil {
 		fail(http.StatusBadGateway, "fetch_failed", "取规则集失败，本机规则未改动", err.Error())

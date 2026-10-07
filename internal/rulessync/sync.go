@@ -37,8 +37,9 @@ type Source struct {
 	// BaseURL 是目录清单地址：返回一个 JSON 数组，每项含 name 与 download_url。
 	// 用这个形状是为了同时兼容 GitHub contents API 和内网镜像。
 	BaseURL string
-	// Ref 是版本选择：留空表示默认分支，也可以是 tag / commit。
-	// 建议固定到 tag —— 默认分支上随时可能是半成品提交。
+	// Ref 是版本选择：留空 = 仓库默认分支上的**最新规则**（应急场景取最新，
+	// 不必等打 tag 或发 Release）；也可以显式钉到某个 tag / commit。
+	// 显式 pin 的代价是"要等发布"，所以只在需要复现某个确定状态时才用。
 	Ref string
 }
 
@@ -256,99 +257,6 @@ func get(ctx context.Context, hc *http.Client, url string) ([]byte, error) {
 		return nil, fmt.Errorf("%s 返回 %d", url, resp.StatusCode)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, maxFileBytes))
-}
-
-// apiBase 是 GitHub API 的基点。声明成变量是为了测试能指向本地假远端。
-var apiBase = "https://api.github.com"
-
-// LatestTag 取仓库里**最新的版本标签**。
-//
-// 为什么用 tags 而不是 releases/latest：只打 tag、不发 Release 是合法用法
-// （例如只想让别人同步规则，不挂二进制包）。只看 Release 会把这种情况卡在
-// "上一个已发布的版本"上 —— 用户以为同步到了最新规则，其实拿到的是旧的。
-// tags 取不到（例如镜像只暴露 releases）时，再退回最新发布。
-func LatestTag(ctx context.Context, hc *http.Client, contentsURL string) (string, error) {
-	base := strings.TrimSpace(contentsURL)
-	if base == "" {
-		base = DefaultSource
-	}
-	i := strings.Index(base, "/repos/")
-	if i < 0 {
-		return "", fmt.Errorf("地址里没有 /repos/，无法推断仓库")
-	}
-	parts := strings.Split(base[i+len("/repos/"):], "/")
-	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
-		return "", fmt.Errorf("地址里缺少 owner/repo")
-	}
-	if hc == nil {
-		hc = &http.Client{Timeout: 30 * time.Second}
-	}
-	repoAPI := apiBase + "/repos/" + parts[0] + "/" + parts[1]
-
-	if body, err := get(ctx, hc, repoAPI+"/tags?per_page=100"); err == nil {
-		var tags []struct {
-			Name string `json:"name"`
-		}
-		if err := json.Unmarshal(body, &tags); err == nil {
-			best := ""
-			for _, t := range tags {
-				if newerTag(t.Name, best) {
-					best = t.Name
-				}
-			}
-			if best != "" {
-				return best, nil
-			}
-		}
-	}
-
-	body, err := get(ctx, hc, repoAPI+"/releases/latest")
-	if err != nil {
-		return "", err
-	}
-	var rel struct {
-		TagName string `json:"tag_name"`
-	}
-	if err := json.Unmarshal(body, &rel); err != nil {
-		return "", err
-	}
-	if strings.TrimSpace(rel.TagName) == "" {
-		return "", fmt.Errorf("最新发布里没有 tag_name")
-	}
-	return rel.TagName, nil
-}
-
-// newerTag 判断 a 是否比 b 新。只比数字段（`v1.3.0` 与 `1.2.0` 都认），
-// 非数字后缀（`-rc1`）按同段处理 —— 用来挑"最新的版本标签"，不做严格 semver。
-func newerTag(a, b string) bool {
-	as, bs := tagParts(a), tagParts(b)
-	for i := 0; i < len(as) || i < len(bs); i++ {
-		var x, y int
-		if i < len(as) {
-			x = as[i]
-		}
-		if i < len(bs) {
-			y = bs[i]
-		}
-		if x != y {
-			return x > y
-		}
-	}
-	return false
-}
-
-func tagParts(s string) []int {
-	s = strings.TrimPrefix(strings.TrimSpace(s), "v")
-	segs := strings.Split(s, ".")
-	out := make([]int, 0, len(segs))
-	for _, seg := range segs {
-		n := 0
-		for i := 0; i < len(seg) && seg[i] >= '0' && seg[i] <= '9'; i++ {
-			n = n*10 + int(seg[i]-'0')
-		}
-		out = append(out, n)
-	}
-	return out
 }
 
 // LastResult 是最近一次同步的结果。
