@@ -613,9 +613,13 @@ type ruleView struct {
 	Transforms []string `json:"transforms,omitempty"`
 	Targets    []string `json:"targets"`
 	Source     string   `json:"source"`
-	HardBlock  bool     `json:"hard_block,omitempty"`
-	Action     string   `json:"action,omitempty"`
-	ChainHead  bool     `json:"chain_head,omitempty"`
+	// File 是规则所在的文件（不含行号）。前端"来源文件"列与 file 过滤都读它 ——
+	// 以前后端只给 source（`rules/40-rce.yaml:206`），前端 pick 的是 file，
+	// 于是那一列永远显示 "—"，file 过滤也无从实现。
+	File      string `json:"file,omitempty"`
+	HardBlock bool   `json:"hard_block,omitempty"`
+	Action    string `json:"action,omitempty"`
+	ChainHead bool   `json:"chain_head,omitempty"`
 	// DisabledByConsole 区分"文件里就禁用"与"控制台临时停用"。
 	DisabledByConsole bool `json:"disabled_by_console,omitempty"`
 }
@@ -643,7 +647,8 @@ func (s *Server) rulesView() ([]ruleView, *rules.RuleSet, *control.State) {
 			ID: r.ID, Message: r.Message, Phase: r.Phase.String(), Severity: r.Severity.String(),
 			Category: r.Category, Score: r.Score, Tags: r.Tags, Enabled: r.Enabled,
 			Operator: r.OperatorName, Transforms: r.TransformNames, Targets: targets,
-			Source: r.Source.String(), HardBlock: r.HardBlock, Action: r.Action.Type,
+			Source: r.Source.String(), File: r.Source.File,
+			HardBlock: r.HardBlock, Action: r.Action.Type,
 			ChainHead:         len(r.ChainMembers) > 1,
 			DisabledByConsole: snap.DisabledRules[r.ID],
 		})
@@ -662,9 +667,12 @@ func (s *Server) handleRules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st := rs.Stats()
+	// 过滤在**过滤后的列表**上做统计，否则"按类目过滤后统计还是全量"会很迷惑。
+	filtered := filterRules(list, r.URL.Query())
 	writeJSON(w, http.StatusOK, map[string]any{
-		"rules":   list,
-		"version": rs.Version,
+		"rules":            filtered,
+		"total_unfiltered": len(list),
+		"version":          rs.Version,
 		"snapshot": func() string {
 			if snap != nil {
 				return snap.Version
@@ -1221,20 +1229,6 @@ func (s *Server) handleConsoleAudit(w http.ResponseWriter, r *http.Request) {
 	// actor/action/at/ok 这些统一字段。这里把"配置变更"与"登录等认证事件"
 	// 合并成一个按时间倒序的列表 —— 运维想看的是"这个控制台被人动过什么"，
 	// 而不是分成两张表自己去对。
-	type auditRow struct {
-		At          time.Time `json:"at"`
-		Actor       string    `json:"actor"`
-		Action      string    `json:"action"`
-		Target      string    `json:"target,omitempty"`
-		OK          bool      `json:"ok"`
-		Remote      string    `json:"remote,omitempty"`
-		Detail      string    `json:"detail,omitempty"`
-		Error       string    `json:"error,omitempty"`
-		FromVersion string    `json:"from_version,omitempty"`
-		ToVersion   string    `json:"to_version,omitempty"`
-		Warnings    []string  `json:"warnings,omitempty"`
-		Kind        string    `json:"kind"`
-	}
 	rows := make([]auditRow, 0, len(changes)+len(auth))
 	for _, c := range changes {
 		rows = append(rows, auditRow{
@@ -1249,6 +1243,7 @@ func (s *Server) handleConsoleAudit(w http.ResponseWriter, r *http.Request) {
 			Detail: a.Detail, Kind: "auth",
 		})
 	}
+	rows = filterAuditRows(rows, r.URL.Query())
 	sort.Slice(rows, func(i, j int) bool { return rows[i].At.After(rows[j].At) })
 	if len(rows) > limit {
 		rows = rows[:limit]
@@ -1454,29 +1449,175 @@ func blockPageVariables() []map[string]string {
 // 抽出来是让 /events 与 /events/export 用**同一套**过滤语义 ——
 // 两边各写一遍，导出出来的东西迟早和页面上看到的不是一回事。
 func eventQueryFrom(q url.Values, limit int) eventstore.Query {
+	// 参数名**同时接受前端别名与规范名**。
+	//
+	// 为什么：前端一直在发 `ip=` / `rule=`，后端只读 `client_ip` / `rule_id` ——
+	// 名字对不上又不报错，于是"填了客户端 IP 却返回全部事件"（实测被指出来过）。
+	// 这类静默忽略比报错难查得多，所以两边都收，别指望调用方永远拼对。
+	pick := func(names ...string) string {
+		for _, n := range names {
+			if v := strings.TrimSpace(q.Get(n)); v != "" {
+				return v
+			}
+		}
+		return ""
+	}
 	query := eventstore.Query{
-		Cursor:       q.Get("cursor"),
+		Cursor:       pick("cursor"),
 		Limit:        limit,
-		Verdict:      q.Get("verdict"),
-		Category:     q.Get("category"),
-		Severity:     q.Get("severity"),
-		ClientIP:     q.Get("client_ip"),
-		RuleID:       q.Get("rule_id"),
-		PathContains: q.Get("path"),
-		Search:       q.Get("q"),
+		Verdict:      pick("verdict"),
+		Category:     pick("category"),
+		Severity:     pick("severity"),
+		ClientIP:     pick("client_ip", "ip"),
+		RuleID:       pick("rule_id", "rule"),
+		PathContains: pick("path"),
+		Search:       pick("q", "search"),
 		OnlyBlocked:  q.Get("blocked") == "1" || q.Get("blocked") == "true",
 	}
-	if v := q.Get("since"); v != "" {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
-			query.Since = t
+	if v := pick("since"); v != "" {
+		if ts, err := time.Parse(time.RFC3339, v); err == nil {
+			query.Since = ts
 		}
+	} else if d, ok := rangeWindow(pick("range")); ok {
+		// 前端发的是 `range=1h|6h|24h|7d`；以前后端只认 since/until，
+		// 于是"最近 1 小时"这个下拉**从来没生效过**（ring buffer 本来就短，
+		// 界面看着像对的，换 24 小时也不会有区别）。
+		query.Since = time.Now().Add(-d)
 	}
-	if v := q.Get("until"); v != "" {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
-			query.Until = t
+	if v := pick("until"); v != "" {
+		if ts, err := time.Parse(time.RFC3339, v); err == nil {
+			query.Until = ts
 		}
 	}
 	return query
+}
+
+// rangeWindow 把控制台时间范围下拉的取值（1h / 6h / 24h / 7d）转成时长。
+func rangeWindow(v string) (time.Duration, bool) {
+	v = strings.TrimSpace(strings.ToLower(v))
+	if v == "" || v == "all" {
+		return 0, false
+	}
+	if strings.HasSuffix(v, "d") {
+		n, err := strconv.Atoi(strings.TrimSuffix(v, "d"))
+		if err != nil || n <= 0 {
+			return 0, false
+		}
+		return time.Duration(n) * 24 * time.Hour, true
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0, false
+	}
+	return d, true
+}
+
+// filterRules 按控制台的过滤条件筛选规则列表。
+//
+// 前端一直在发 `q`/`category`/`severity`/`enabled`/`file`，后端以前**一个都不读** ——
+// 于是"按文件、类目、严重度筛选"全是摆设（与事件页 IP 过滤同一类问题，
+// 由 scripts/api_contract.py 的门禁查出来）。
+func filterRules(list []ruleView, q url.Values) []ruleView {
+	kw := strings.ToLower(strings.TrimSpace(q.Get("q")))
+	category := strings.ToLower(strings.TrimSpace(q.Get("category")))
+	severity := strings.ToLower(strings.TrimSpace(q.Get("severity")))
+	file := strings.ToLower(strings.TrimSpace(q.Get("file")))
+	var wantEnabled *bool
+	switch strings.ToLower(strings.TrimSpace(q.Get("enabled"))) {
+	case "1", "true", "yes", "enabled":
+		v := true
+		wantEnabled = &v
+	case "0", "false", "no", "disabled":
+		v := false
+		wantEnabled = &v
+	}
+	if kw == "" && category == "" && severity == "" && file == "" && wantEnabled == nil {
+		return list
+	}
+	out := make([]ruleView, 0, len(list))
+	for _, rv := range list {
+		if kw != "" && !strings.Contains(strings.ToLower(rv.ID+" "+rv.Message), kw) &&
+			!containsFold(rv.Tags, kw) {
+			continue
+		}
+		if category != "" && !strings.EqualFold(rv.Category, category) {
+			continue
+		}
+		if severity != "" && !strings.EqualFold(rv.Severity, severity) {
+			continue
+		}
+		if file != "" && !strings.Contains(strings.ToLower(rv.File+" "+rv.Source), file) {
+			continue
+		}
+		if wantEnabled != nil && rv.Enabled != *wantEnabled {
+			continue
+		}
+		out = append(out, rv)
+	}
+	return out
+}
+
+// containsFold 判断切片里是否有元素包含 needle（都已小写）。
+func containsFold(items []string, needle string) bool {
+	for _, it := range items {
+		if strings.Contains(strings.ToLower(it), needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// auditRow 是 /console-audit 的一行（配置变更与认证事件合并后的统一形状）。
+type auditRow struct {
+	At          time.Time `json:"at"`
+	Actor       string    `json:"actor"`
+	Action      string    `json:"action"`
+	Target      string    `json:"target,omitempty"`
+	OK          bool      `json:"ok"`
+	Remote      string    `json:"remote,omitempty"`
+	Detail      string    `json:"detail,omitempty"`
+	Error       string    `json:"error,omitempty"`
+	FromVersion string    `json:"from_version,omitempty"`
+	ToVersion   string    `json:"to_version,omitempty"`
+	Warnings    []string  `json:"warnings,omitempty"`
+	Kind        string    `json:"kind"`
+}
+
+// filterAuditRows 按控制台过滤条件筛审计行（actor/action/target/result）。
+// 前端一直发这四个参数，后端以前只读 limit —— 填了操作人也照样返回全部。
+func filterAuditRows(rows []auditRow, q url.Values) []auditRow {
+	actor := strings.ToLower(strings.TrimSpace(q.Get("actor")))
+	action := strings.ToLower(strings.TrimSpace(q.Get("action")))
+	target := strings.ToLower(strings.TrimSpace(q.Get("target")))
+	var wantOK *bool
+	switch strings.ToLower(strings.TrimSpace(q.Get("result"))) {
+	case "ok", "success", "succeeded", "allow", "allowed":
+		v := true
+		wantOK = &v
+	case "fail", "failed", "failure", "deny", "denied", "error":
+		v := false
+		wantOK = &v
+	}
+	if actor == "" && action == "" && target == "" && wantOK == nil {
+		return rows
+	}
+	out := make([]auditRow, 0, len(rows))
+	for _, r := range rows {
+		if actor != "" && !strings.Contains(strings.ToLower(r.Actor), actor) {
+			continue
+		}
+		if action != "" && !strings.Contains(strings.ToLower(r.Action), action) {
+			continue
+		}
+		if target != "" && !strings.Contains(strings.ToLower(r.Target+" "+r.Detail), target) {
+			continue
+		}
+		if wantOK != nil && r.OK != *wantOK {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // firstNonEmpty 返回第一个非空字符串。

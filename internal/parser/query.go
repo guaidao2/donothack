@@ -90,6 +90,17 @@ func ParseQueryInto(dst *tx.Params, sc *Scratch, raw string, lim Limits) {
 				sc.Val = appendPercentDecoded(sc.Val, pair[eq+1:], true)
 			} else {
 				sc.Key = appendPercentDecoded(sc.Key, pair, true)
+				// 片段里带空格、斜杠、`$` 这类**不可能是参数名**的字符时，
+				// 它更可能是被我们"多切一刀"（`;` 也当分隔符）切出来的**值** ——
+				// 后端只按 '&' 切（PHP 默认如此），会把 `cat /etc/passwd` 整段
+				// 留在前一个参数的值里，这份证据不能丢（实测：同一载荷放 body 被拦、
+				// 放 query 直接执行）。所以再当值收一份。
+				//
+				// 纯标识符片段（`?debug` 这种 flag）保持"值 = 空串"的 PHP 语义不变，
+				// 免得把每个 flag 都变成两个参数、顺带抬高 ARGS_COUNT。
+				if !isPlainParamName(pair) {
+					sc.Val = appendPercentDecoded(sc.Val, pair, true)
+				}
 			}
 			if len(sc.Val) > lim.MaxParamValLen {
 				sc.Val = sc.Val[:lim.MaxParamValLen]
@@ -103,6 +114,23 @@ func ParseQueryInto(dst *tx.Params, sc *Scratch, raw string, lim Limits) {
 		}
 		i++ // 跳过分隔符
 	}
+}
+
+// isPlainParamName 判断片段是不是"普通参数名"（只含字母数字、下划线、连字符）。
+// 用来区分 `?debug` 这种正常 flag 与 `cat /etc/passwd` 这种被误切出来的值。
+func isPlainParamName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_', c == '-', c == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // indexByte 是 strings.IndexByte 的本地版本（避免引入 strings 的调用开销，语义相同）。

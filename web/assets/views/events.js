@@ -115,11 +115,14 @@ function renderList(container, ctx) {
   const tableHost = el('div');
 
   function params() {
+    // 发**规范参数名**：后端对 ip/client_ip 与 rule/rule_id 两种写法都收，
+    // 但前端没有理由继续发别名 —— 曾经因为两边名字不一致，填了客户端 IP
+    // 却返回全部事件（过滤条件被静默忽略，界面上看不出来）。
     const out = { range: filters.range };
     if (filters.verdict) out.verdict = filters.verdict;
     if (filters.category) out.category = filters.category;
-    if (filters.rule) out.rule = filters.rule;
-    if (filters.ip) out.ip = filters.ip;
+    if (filters.rule) out.rule_id = filters.rule;
+    if (filters.ip) out.client_ip = filters.ip;
     if (filters.path) out.path = filters.path;
     out.limit = filters.limit;
     return out;

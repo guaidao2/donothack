@@ -272,6 +272,22 @@ def check_alloc_gate() -> bool:
     print(f"  BenchmarkEngine_NoMatch：{ns:.0f} ns/op、{b:.0f} B/op、0 allocs/op")
     return True
 
+def check_api_contract() -> bool:
+    """控制台前后端参数契约：前端发的查询参数必须有后端读取。
+
+    存在的理由：前端发 `ip=`、后端读 `client_ip` —— 名字不一致又不报错，
+    "填了客户端 IP 却返回全部事件"。这类静默忽略靠人点界面查不全，改成门禁。
+    """
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "api_contract.py")],
+        cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    out = (proc.stdout or "") + (proc.stderr or "")
+    for line in out.strip().splitlines():
+        print("  " + line.rstrip())
+    return proc.returncode == 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="donothack 提交前门禁")
     parser.add_argument("--skip-tests", action="store_true", help="跳过 go test")
@@ -286,6 +302,7 @@ def main() -> int:
     checks.append(("控制台 DOM 写入禁令（innerHTML 等）", check_frontend_write_ban))
     checks.append(("emoji / 装饰符号禁令", check_no_emoji))
     checks.append(("embed 目录一致性（web/ 必须全部进 git）", check_embed_tracked))
+    checks.append(("控制台前后端参数契约（前端发的过滤条件后端必须读）", check_api_contract))
     checks.append(("热路径零分配门禁（BenchmarkEngine_NoMatch）", check_alloc_gate))
 
     failed = [name for name, fn in checks if not step(name, fn)]

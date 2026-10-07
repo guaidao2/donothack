@@ -312,6 +312,48 @@ rules:
         - "report-2024.pdf"
         - "data/export.csv"
 
+  # 通配符混淆：shell 的 glob 会把 `?`/`*`/`[]` 展开成真实字符，
+  # `/etc/pass?d` 与 `/etc/passwd` 等价。类目里的 pm 字面量认不出这种形态，
+  # 所以单列一条正则规则（要求"路径/参数边界 + 被 glob 打断的敏感文件名"）。
+  #
+  # 只在两种形态上立案，避免打宽：
+  #   1. 文件名内部被 glob 打断：pass?d、sha*dow、id_rs?、authoriz?d_keys、win?ini、boot?ini
+  #   2. 目录被 glob 打断且后面紧跟敏感文件名：/e??/passwd、/e*/shadow
+  - id: LFI-7007
+    phase: 2
+    severity: high
+    category: lfi
+    score: 5
+    message: "文件读取特征：通配符混淆的敏感文件路径"
+    tags: [lfi, owasp-a01, sensitive-file, glob]
+    targets:
+      - collection: ARGS
+      - collection: REQUEST_URI
+      - collection: REQUEST_PATH
+      - collection: REQUEST_BODY
+    transforms:
+      - urlDecode
+      - urlDecode
+      - removeNulls
+      - lowercase
+    operator:
+      name: regex
+      params:
+        pattern: '(?:^|[/\s;|&\"''=])(?:pass[?*]{1,2}w?d|sha[?*]{1,2}dow|gr[?*]{1,2}up|id_rs[?*]{1,2}|authorize[?*]{1,2}d_keys|win[?*.]{1,2}ini|boot[?*.]{1,2}ini|[a-z?*\[]{0,10}[?*\[]{1,3}[a-z?*\[]{0,10}/[a-z?*\[]{0,20}(?:passwd|shadow|id_rsa))'
+    test:
+      positive:
+        - "; cat /etc/pass?d"
+        - "/etc/pass*d"
+        - "/etc/sha?dow"
+        - "/e??/passwd"
+        - "/root/.ssh/id_rs?"
+      negative:
+        - "/images/*.png"
+        - "/etc/nginx/*.conf"
+        - "a*b"
+        - "what? really"
+        - "/api/v1/items?page=2"
+
   - id: RFI-8001
     phase: 2
     severity: critical
