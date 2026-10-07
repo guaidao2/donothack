@@ -287,6 +287,58 @@ real_ip:
 `trusted_proxies` 留空时 `X-Forwarded-For` 会被**完全忽略**（这是刻意的：随便信任这个头
 等于让攻击者自由伪造来源）。只填你确实控制的那几段 —— 填 `0.0.0.0/0` 就等于放弃来源判断。
 
+### 4.6 拦截页怎么改
+
+被拦住时返回给终端用户的那一页（默认 403；限速与封禁固定 429）。可以换整页模板，也可以只改文字。
+
+**换整页模板**：把 HTML 放在配置文件旁边，然后在配置里指过去。
+
+```yaml
+block_page:
+  file: "blocked.html"        # 相对配置文件所在目录
+```
+
+模板是 Go 的 `html/template`（取值自动转义，不要在里面拼未转义的 HTML），可用字段：
+
+```html
+<h1>{{.Title}}</h1>
+<p>请求已被拦下：{{.CategoryLabel}}（{{.Category}}）</p>
+<p>时间 {{.Time}}　来源 {{.ClientIP}}　请求 ID {{.TxID}}</p>
+```
+
+可用的字段：`.Title`、`.Status`、`.StatusText`、`.TxID`、`.Time`、`.Method`、`.Host`、`.Path`、
+`.Category`（机器可读类目）、`.CategoryLabel`（中文类目名）、`.RuleID`、`.ClientIP`、`.RetryAfter`、
+`.Branding`、`.ProductName`、`.ProductURL`、`.Contact`、`.Version`。
+
+`.RuleID` 默认不展示给终端用户，自定义模板想用可以用；但给终端用户看规则 ID 等于告诉对方
+命中了哪条规则，便于他针对性调 payload，一般不建议。
+
+**只改文字与品牌**：
+
+```yaml
+block_page:
+  status: 403
+  branding: true              # false 时不显示产品名与版本
+  product_name: "某某网关"
+  product_url: "https://example.com"
+  contact: "ops@example.com"  # 误报申诉渠道，会显示在页面上
+  title: "请求已被拦下"
+```
+
+**不重启就生效**：以上几项都能在运行期原子替换，走 `GET/PUT /api/v1/block-page`
+（`POST /api/v1/block-page/preview` 可以先渲染一份样例看效果）。PUT 的请求体：
+
+```json
+{ "html": "<h1>{{.Title}}</h1>", "persist": true }
+```
+
+`persist: true` 会把模板写进 `block_page.file`，重启后仍然是它；`{"reset": true}` 恢复内置模板；
+同一个请求里还可以顺带传 `status` / `branding` / `product_name` / `product_url` / `contact` / `title`。
+
+**改坏了不会把线上弄挂**：保存和启动加载时都会拿一份样例数据渲染一遍做校验，编译不过或字段
+不存在就**整次拒绝**，原来的模板继续生效。所以改模板的推荐顺序是：先 `preview` 看渲染结果，
+确认没问题再 `PUT` 保存。
+
 ## 5. 性能与容量
 
 ### 5.1 档位
