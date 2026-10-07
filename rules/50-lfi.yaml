@@ -1,16 +1,24 @@
 # 路径穿越 / 文件包含（LFI）与远程文件包含 / SSRF（RFI）
 #
-# 变换链按规则分两种，刻意不共用：
-#   - 7001/7004/7005/7006：urlDecode ×2 + removeNulls + lowercase
+# 变换链按规则分，刻意不共用：
+#   - 7001/7004/7005/7006：urlDecode ×2（+ removeNulls）+ lowercase
 #     —— 解码后匹配：既接受原始明文，也接受一次/两次编码的形态。
 #   - 7002：只 lowercase
 #     —— 不解码，直接匹配 %2e%2e%2f / %252e%252e 这类"编码形态的字面量"，
 #        与解码后那条互为兜底（扫描器常按代数叠加编码）。
-#   注意：这里**不能**挂 normalizePath —— 路径规范化会把 ../ 消掉，
-#   那正好把要检测的证据抹掉。规范化后的形态由 10-scanner.yaml 的路径规则负责。
+#
+# **normalizePath 只有 7004 能挂**，这不是随手写的：
+#   - 7001（回溯语义）与 7002（编码字面量）要的证据就是 `../` 本身，
+#     规范化会把它解掉 —— 挂了等于把要检测的东西抹掉；
+#   - 7005（PHP 流包装器）要的是 `php://` 这个形态，而 normalizePath 会把
+#     `//` 折成 `/`（变成 `php:/`），挂了反而漏检；
+#   - 7004 匹配的是"目标文件"，等价写法必须折叠成同一形态才能拦全 ——
+#     `/etc//passwd`、`/etc/./passwd`、`/etc/x/../passwd`、`%2f` 编码斜杠
+#     都要回到 `/etc/passwd`。实测（DVWA 绝对路径包含）不挂时这些变体整条绕过。
 #
 # crackweb 会发 //etc/passwd、/.//etc/passwd 这类规范化变体 ——
-# 它们都包含 /etc/passwd 这个子串，7004 直接覆盖，不需要单独写规则。
+# 路径位置的变体由 parser 的路径规范化负责，参数值位置的变体由 7004 的
+# normalizePath 负责（此前只覆盖了前者，参数值那一半是盲区）。
 version: 1
 meta:
   name: "路径穿越与文件包含"
@@ -141,9 +149,17 @@ rules:
       - collection: REQUEST_URI
       - collection: REQUEST_PATH
       - collection: REQUEST_BODY
+    # 这一条**必须**挂 normalizePath（与 7001/7002 正好相反）：
+    # 它匹配的是"目标文件"，所以要把等价写法折叠成同一个形态 ——
+    # `/etc//passwd`、`/etc/./passwd`、`/etc/x/../passwd`、`%2f` 编码斜杠，
+    # normalizePath 会折 `//`、去掉 `.` 段、解掉 `..` 段，全都回到 `/etc/passwd`。
+    # 实测（DVWA 绝对路径包含）：不挂之前这些变体整条绕过、读到 /etc/passwd。
+    # 顺序：两次 urlDecode 之后、lowercase 之前；normalizePath 内部还会再解一次
+    # 编码并截断 NUL，所以 removeNulls 只是兜底。
     transforms:
       - urlDecode
       - urlDecode
+      - normalizePath
       - removeNulls
       - lowercase
     operator:
@@ -186,11 +202,20 @@ rules:
         - "%2fetc%2fpasswd"
         - "C:\\Windows\\win.ini"
         - "..%2f..%2fWEB-INF%2fweb.xml"
+        # 等价路径写法（实测都曾绕过）：双斜杠、点段、目录+回退、编码斜杠、大小写
+        - "/etc//passwd"
+        - "/etc/./passwd"
+        - "/etc/foo/../passwd"
+        - "%2fetc%2f%2fpasswd"
+        - "/ETC//Passwd"
       negative:
         - "docs/readme.md"
         - "assets/img/logo.png"
         - "/var/www/html/index.html"
         - "please review the password policy"
+        # 归一化之后仍然不该误伤的：CDN 双斜杠、相对路径里的单点
+        - "//cdn.example.com/logo.png"
+        - "./assets/app.css"
 
   - id: LFI-7005
     phase: 2

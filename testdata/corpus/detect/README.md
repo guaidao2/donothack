@@ -37,3 +37,10 @@ dist/donothack.exe test -r testdata/corpus/detect/sqli-single-quote-probe.http -
   规则链里的 compressWhitespace 把换行折成了空格），但"换行后跟一个词"在多行文本里
   也可能出现，所以按弱信号处理：记分叠加，不单独立案。
   带参数的形态（`%0acat /etc/passwd`）会叠上 `RCE-6003`，分数够高、照常拦。
+
+* `rce-cmd-doubleslash-get.http` / `rce-rm-doubleslash-get.http` —— Windows 选项与命令路径的
+  **重复斜杠**形态（`cmd //c whoami`、`rm -rf //`），4 分（`RCE-6004/6005/6006`）。
+  加 `normalizePath` 之前它们**整条漏检**，现在与基准形态（`cmd /c whoami`）行为一致：
+  都命中、都只记分。是否让这类单独就能拦是阈值策略问题（当前 4 分低于阈值 5），
+  不是漏检 —— 归在 detect 正是要留住这个区别。
+

