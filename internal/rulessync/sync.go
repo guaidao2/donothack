@@ -1,0 +1,258 @@
+// Package rulessync 从远端取回一份规则集，校验通过后才替换本地规则目录。
+//
+// 设计取舍（有意保持简单）：
+//   - 只做**手动**同步（CLI / 控制台按钮触发），不做定时自动拉取。
+//   - 不引入签名体系：规则是数据、不能执行代码，最坏后果是"检测失效或误报"，
+//     而不是被拿下机器；与其管理一把长期私钥，不如把力气花在下面这道闸门上。
+//   - **闸门**：新规则必须先通过正式加载器的全部校验（含每条规则的正负样本自测），
+//     通过才替换；任何一步失败都保持原状并把错误交回调用方。
+//     没有这道闸门，一次手滑的提交就能让线上"零规则在跑"，而界面看着一切正常。
+package rulessync
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"donothack/internal/rules"
+)
+
+// DefaultSource 是默认的目录清单地址（GitHub contents API 的 rules 目录）。
+const DefaultSource = "https://api.github.com/repos/guaidao2/donothack/contents/rules"
+
+// maxFileBytes 限制单个规则文件大小：规则是文本，正常几 KB。
+// 没有上限的下载等于给远端一个写满磁盘的机会。
+const maxFileBytes = 1 << 20
+
+// Source 描述从哪里取。
+type Source struct {
+	// BaseURL 是目录清单地址：返回一个 JSON 数组，每项含 name 与 download_url。
+	// 用这个形状是为了同时兼容 GitHub contents API 和内网镜像。
+	BaseURL string
+	// Ref 是版本选择：留空表示默认分支，也可以是 tag / commit。
+	// 建议固定到 tag —— 默认分支上随时可能是半成品提交。
+	Ref string
+}
+
+// Result 是一次同步的结果，供审计与界面展示。
+type Result struct {
+	FromVersion string // 替换前的规则集指纹
+	ToVersion   string // 替换后的规则集指纹（未替换时与 From 相同）
+	Files       int    // 文件数
+	Source      string // 实际取回的地址（含 ref）
+	Skipped     bool   // 指纹相同，未做替换
+}
+
+type remoteFile struct {
+	Name        string `json:"name"`
+	DownloadURL string `json:"download_url"`
+}
+
+// Fetch 取回目录清单与每个文件的内容。**只读远端，不碰本地磁盘。**
+func Fetch(ctx context.Context, s Source, hc *http.Client) (map[string][]byte, string, error) {
+	base := strings.TrimSpace(s.BaseURL)
+	if base == "" {
+		base = DefaultSource
+	}
+	if !strings.HasPrefix(base, "https://") && !strings.HasPrefix(base, "http://") {
+		return nil, "", fmt.Errorf("同步地址必须是 http(s): %s", base)
+	}
+	if hc == nil {
+		hc = &http.Client{Timeout: 30 * time.Second}
+	}
+	ref := strings.TrimSpace(s.Ref)
+	listURL := base
+	if ref != "" {
+		listURL += "?ref=" + ref
+	}
+
+	body, err := get(ctx, hc, listURL)
+	if err != nil {
+		return nil, "", fmt.Errorf("取目录清单失败：%w", err)
+	}
+	var items []remoteFile
+	if err := json.Unmarshal(body, &items); err != nil {
+		return nil, "", fmt.Errorf("目录清单不是预期的 JSON 数组：%w", err)
+	}
+
+	out := make(map[string][]byte, len(items))
+	for _, it := range items {
+		name := strings.TrimSpace(it.Name)
+		// 只收规则文件，且不接受路径分隔符 —— 避免远端用文件名写到目录外。
+		if name == "" || strings.ContainsAny(name, `/\`) || !strings.HasSuffix(name, ".yaml") {
+			continue
+		}
+		if it.DownloadURL == "" {
+			continue
+		}
+		data, err := get(ctx, hc, it.DownloadURL)
+		if err != nil {
+			return nil, "", fmt.Errorf("取 %s 失败：%w", name, err)
+		}
+		out[name] = data
+	}
+	if len(out) == 0 {
+		return nil, "", fmt.Errorf("清单里没有任何 .yaml 规则文件（%s）", listURL)
+	}
+	return out, listURL, nil
+}
+
+// Apply 把取回的规则写进 rulesDir，并在替换前后各校验一次。
+//
+// 顺序刻意是"先落地到临时目录 → 校验 → 备份旧文件 → 就位"：
+// 任何一步失败都恢复原状，调用方拿到的目录要么是旧的、要么是校验通过的新集合。
+func Apply(rulesDir string, files map[string][]byte) (Result, error) {
+	res := Result{Files: len(files)}
+	if rulesDir == "" {
+		return res, fmt.Errorf("规则目录不能为空")
+	}
+	if len(files) == 0 {
+		return res, fmt.Errorf("没有要写入的规则文件")
+	}
+
+	// 1) 当前指纹（目录为空时按"无规则集"处理，不算失败）
+	cur, err := rules.LoadDir(rules.DefaultOptions(), rulesDir, []string{"*.yaml"})
+	if err != nil {
+		return res, fmt.Errorf("当前规则集无法加载，先修好它再同步：%w", err)
+	}
+	res.FromVersion = cur.Version
+
+	// 2) 落到临时目录并校验
+	stage, err := os.MkdirTemp(filepath.Dir(filepath.Clean(rulesDir)), ".rulesync-*")
+	if err != nil {
+		return res, fmt.Errorf("建临时目录失败：%w", err)
+	}
+	defer os.RemoveAll(stage)
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(stage, name), data, 0o644); err != nil {
+			return res, fmt.Errorf("写入 %s 失败：%w", name, err)
+		}
+	}
+	next, err := rules.LoadDir(rules.DefaultOptions(), stage, []string{"*.yaml"})
+	if err != nil {
+		return res, fmt.Errorf("新规则集没通过校验，已保持原状：%w", err)
+	}
+	res.ToVersion = next.Version
+	res.Source = fmt.Sprintf("%d 个文件", len(files))
+
+	// 3) 指纹相同 → 不折腾
+	if next.Version == cur.Version {
+		res.Skipped = true
+		return res, nil
+	}
+
+	// 4) 备份旧目录 → 就位新文件 → 再校验一次（这次校验的是真正生效的那份）
+	backup := stage + "-old"
+	if err := os.MkdirAll(backup, 0o755); err != nil {
+		return res, fmt.Errorf("建备份目录失败：%w", err)
+	}
+	defer os.RemoveAll(backup)
+	oldNames, err := moveRules(rulesDir, backup)
+	if err != nil {
+		return res, fmt.Errorf("备份旧规则失败：%w", err)
+	}
+	if err := copyInto(stage, rulesDir); err != nil {
+		_ = restore(rulesDir, backup, oldNames)
+		return res, fmt.Errorf("就位新规则失败，已回滚：%w", err)
+	}
+	if _, err := rules.LoadDir(rules.DefaultOptions(), rulesDir, []string{"*.yaml"}); err != nil {
+		_ = restore(rulesDir, backup, oldNames)
+		return res, fmt.Errorf("就位后校验未通过，已回滚：%w", err)
+	}
+	return res, nil
+}
+
+// moveRules 把 dir 下的规则文件移到 backup，返回被移动的文件名。
+func moveRules(dir, backup string) ([]string, error) {
+	names := []string{}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return names, err
+	}
+	for _, e := range ents {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+			continue
+		}
+		if err := os.Rename(filepath.Join(dir, e.Name()), filepath.Join(backup, e.Name())); err != nil {
+			return names, err
+		}
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func copyInto(from, to string) error {
+	ents, err := os.ReadDir(from)
+	if err != nil {
+		return err
+	}
+	for _, e := range ents {
+		if e.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(from, e.Name()))
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(to, e.Name()), data, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// restore 把备份里的旧文件放回去，并删掉这次新加进来的文件。
+func restore(dir, backup string, oldNames []string) error {
+	want := map[string]bool{}
+	for _, n := range oldNames {
+		want[n] = true
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range ents {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+			continue
+		}
+		if !want[e.Name()] {
+			_ = os.Remove(filepath.Join(dir, e.Name())) // 旧集合里没有的，就是这次新加的
+		}
+	}
+	for _, n := range oldNames {
+		data, err := os.ReadFile(filepath.Join(backup, n))
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(dir, n), data, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func get(ctx context.Context, hc *http.Client, url string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "donothack-rulesync")
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s 返回 %d", url, resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, maxFileBytes))
+}
