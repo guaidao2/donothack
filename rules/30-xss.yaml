@@ -29,6 +29,7 @@ rules:
     transforms:
       - urlDecode
       - urlDecode
+      - urlDecodeUni
       - htmlEntityDecode
       - jsDecode
       - compressWhitespace
@@ -65,6 +66,7 @@ rules:
     transforms:
       - urlDecode
       - urlDecode
+      - urlDecodeUni
       - htmlEntityDecode
       - jsDecode
       - compressWhitespace
@@ -99,6 +101,7 @@ rules:
     transforms:
       - urlDecode
       - urlDecode
+      - urlDecodeUni
       - htmlEntityDecode
       - jsDecode
       - compressWhitespace
@@ -156,6 +159,7 @@ rules:
     transforms:
       - urlDecode
       - urlDecode
+      - urlDecodeUni
       - htmlEntityDecode
       - jsDecode
       - compressWhitespace
@@ -199,6 +203,7 @@ rules:
     transforms:
       - urlDecode
       - urlDecode
+      - urlDecodeUni
       - htmlEntityDecode
       - jsDecode
       - compressWhitespace
@@ -289,6 +294,7 @@ rules:
     transforms:
       - urlDecode
       - urlDecode
+      - urlDecodeUni
       - htmlEntityDecode
       - jsDecode
       - compressWhitespace
@@ -338,6 +344,7 @@ rules:
     transforms:
       - urlDecode
       - urlDecode
+      - urlDecodeUni
       - htmlEntityDecode
       - jsDecode
       - compressWhitespace
@@ -370,6 +377,7 @@ rules:
     transforms:
       - urlDecode
       - urlDecode
+      - urlDecodeUni
       - htmlEntityDecode
       - compressWhitespace
       - lowercase

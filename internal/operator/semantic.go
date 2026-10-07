@@ -349,12 +349,34 @@ func stackedQuery(s string) bool {
 		}
 		rest := strings.TrimSpace(s[i+1:])
 		for _, kw := range stackedKeywords {
-			if strings.HasPrefix(rest, kw) {
+			if hasKeywordPrefix(rest, kw) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// hasKeywordPrefix 判断 rest 是否以关键字开头，比对时把 `+` 与空格视为等价。
+//
+// 为什么需要：查询串里的 `+` 代表空格，但 **REQUEST_URI 保留的是原始串**（`+` 没被解成空格）。
+// 于是 `?id=1;DROP+TABLE+users` 走到这里，分号后面拿到的是 `drop+table+users`，
+// 用 `strings.HasPrefix(rest, "drop ")` 配不上 —— 实测这条堆叠注入曾整条漏检。
+// 只比前 len(kw) 个字节，零分配。
+func hasKeywordPrefix(rest, kw string) bool {
+	if len(rest) < len(kw) {
+		return false
+	}
+	for i := 0; i < len(kw); i++ {
+		c := rest[i]
+		if c == '+' {
+			c = ' '
+		}
+		if c != kw[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // stackedKeywords 是堆叠查询的关键字表（顺序即匹配顺序）。

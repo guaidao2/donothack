@@ -176,49 +176,6 @@ rules:
   # 要真正检测它，必须在 net/http 之前拦截原始字节。
   #
   # 需要防的是 WAF 前面还有一层会自己解释 CL/TE 的代理（如老 nginx）时的
-  # "前端与 donothack 之间"的走私 —— 那属于部署拓扑问题，应当在文档里写明。
-
-  - id: PROTO-1008
-    phase: 1
-    severity: high
-    category: protocol
-    score: 4
-    message: "Transfer-Encoding 取值异常（重复或混淆的分块声明）"
-    tags: [protocol, request-smuggling, http-desync]
-    targets:
-      - collection: REQUEST_HEADERS
-        selector: "transfer-encoding"
-    transforms:
-      - trim
-      - lowercase
-      - compressWhitespace
-    operator:
-      name: pm
-      params:
-        patterns:
-          - "chunked,"
-          - "chunked ,"
-          - ",chunked"
-          - ", chunked"
-          - "xchunked"
-          - "chunked;"
-          - "chunked="
-          - "chunked ="
-          - "chunked \x0b"
-          - "\x0bchunked"
-    test:
-      positive:
-        - "chunked, chunked"
-        - "xchunked"
-        - "chunked;q=1"
-      negative:
-        - "chunked"
-        - "identity"
-        - "gzip, deflate"
-
-  # ── Content-Encoding 合法性 ─────────────────────────────────────────
-  # 解码器只实现 gzip / deflate / br / zstd / identity。
-  # 声明了别的编码意味着"WAF 解不开这段体" —— 属于检测缺口，只记分不拦。
   - id: PROTO-1009
     phase: 1
     severity: low

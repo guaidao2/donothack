@@ -29,9 +29,13 @@ rules:
     # （`127.0.0.1` 与 `id`），单看任何一个值都看不到 `;id` 这个组合 ——
     # 而**后端不一定这么切**（PHP/部分框架认 `;` 作分隔符，有些又不认）。
     # 补上原始 URI 让规则能看到完整形态，避免"WAF 与后端切分方式不一致"的盲区。
+    # 也看请求头：`Cookie: c=;cat /etc/passwd` 这种载荷在 Cookie 集合里会被分号
+    # 切成空值，只有**原始的 Cookie 头**保留着完整证据（实测曾漏检）。
     targets:
       - collection: ARGS
       - collection: REQUEST_BODY
+      - collection: REQUEST_HEADERS
+      - collection: REQUEST_COOKIES
       - collection: REQUEST_URI
     # **没有 compressWhitespace**（踩过的坑）：它把 `\n`、`\r` 折成空格，
     # 而算子恰恰靠"分隔符 + 命令名"判断命令注入 —— 于是 `?host=127.0.0.1%0aid`
@@ -61,6 +65,9 @@ rules:
         - ";cat${IFS}/etc/passwd"
         - ";cat$IFS/etc/passwd"
       negative:
+        - "gzip, deflate, br;q=1.0"
+        - "multipart/form-data; boundary=----x"
+        - "text/html; charset=utf-8; q=0.9"
         - "Cats; dogs; and birds"
         - "the total is $5 (approx)"
         - "Please confirm; the team will follow up"
@@ -109,9 +116,13 @@ rules:
     score: 5
     message: "命令注入特征：命令分隔符后紧跟系统命令"
     tags: [rce, owasp-a03, cmdi]
+    # 也看请求头：`Cookie: c=;cat /etc/passwd` 这种载荷在 Cookie 集合里会被分号
+    # 切成空值，只有**原始的 Cookie 头**保留着完整证据（实测曾漏检）。
     targets:
       - collection: ARGS
       - collection: REQUEST_BODY
+      - collection: REQUEST_HEADERS
+      - collection: REQUEST_COOKIES
       - collection: REQUEST_URI
     transforms:
       - urlDecode
@@ -137,6 +148,9 @@ rules:
         - ";cat$IFS/etc/passwd"
         - "|cat${IFS}${IFS}/etc/shadow"
       negative:
+        - "gzip, deflate, br;q=1.0"
+        - "multipart/form-data; boundary=----x"
+        - "text/html; charset=utf-8; q=0.9"
         - "Cats; dogs; and birds"
         - "the order id 42 is missing"
         - "Separator: A | B | C"

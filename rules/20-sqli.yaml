@@ -54,6 +54,42 @@ rules:
         - "We visited the European Union in 2019 and selected a hotel"
         - "Select all items in the list"
 
+  # 关键字混淆：CTF 里最常见的两种写法 —— 用 `CHAR(...)` 拼字符串、
+  # 用 `0x...` 十六进制字面量代替关键字。纯字面量规则认不出，
+  # 但它们**必须带 SQL 关键字才有意义**，所以判据是"混淆手法 + 关键字"同时出现，
+  # 正常业务里不会这么写（实测这两种形态此前 0 分漏过）。
+  - id: SQLI-4013
+    phase: 2
+    severity: critical
+    category: sqli
+    score: 5
+    message: "SQL 注入特征：关键字混淆（CHAR() 拼接 / 十六进制字面量）"
+    tags: [sqli, owasp-a03, obfuscation]
+    targets:
+      - collection: ARGS
+      - collection: REQUEST_BODY
+      - collection: REQUEST_URI
+    transforms:
+      - urlDecode
+      - urlDecode
+      - replaceComments
+      - compressWhitespace
+      - lowercase
+    operator:
+      name: regex
+      params:
+        pattern: 'char\s*\(\s*\d{1,3}(\s*,\s*\d{1,3}){2,}\s*\)\s*(?:union|select|from|where|and|or)\b|(?:union|select|from|where)\s+char\s*\(\s*\d{1,3}(\s*,\s*\d{1,3}){2,}\s*\)|0x[0-9a-f]{8,}\s*(?:union|select|from|where)\b|(?:union|select|from)\s+0x[0-9a-f]{4,}\b'
+    test:
+      positive:
+        - "1 UNION SELECT CHAR(117,110,105,111,110)"
+        - "id=CHAR(117,110,105,111,110) SELECT 1"
+        - "id=0x554e494f4e SELECT 1"
+        - "1 UNION SELECT 0x61646d696e"
+      negative:
+        - "the char(65,66,67) example is in the API docs"
+        - "color in hex is 0xff00ff"
+        - "select the option from the list"
+
   - id: SQLI-4002
     phase: 2
     severity: critical
@@ -385,6 +421,7 @@ rules:
       - collection: ARGS
       - collection: REQUEST_URI
       - collection: REQUEST_BODY
+      - collection: REQUEST_HEADERS
     transforms:
       - urlDecode
       - urlDecode
