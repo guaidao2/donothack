@@ -253,19 +253,53 @@ func editDistance(a, b string) int {
 // 原先 `fileBase` 是包级可变变量、由 `rules.LoadFiles` 在每次加载开头写它，
 // 于是"控制台校验规则片段"与"热替换规则集"并发时会构成 data race，
 // 还可能让 `pmFromFile` 解析到**另一次加载**的目录去。
+// resolveFile 把规则里的名单文件名解析成真实路径，并**限制在基准目录内**。
+//
+// 这里必须挡住两类越界：
+//   - 绝对路径：`file: /etc/passwd` 曾经被原样放行，而名单读取失败时的错误里
+//     会带回文件内容（见 buildIPMatch），于是一个规则校验接口就能读主机任意文件；
+//   - 相对路径里的 `..`：只判断前缀是否为 ".." 挡不住 `sub/../../etc/passwd`。
+//
+// 所以统一按"解析成绝对路径后必须仍在基准目录下"判定，并额外跟一次软链接解析
+// （防止基准目录里放一个指向外面的符号链接）。
 func resolveFile(base, name string) (string, error) {
-	clean := filepath.Clean(name)
-	if filepath.IsAbs(clean) {
-		return clean, nil
-	}
-	// 不允许用 .. 逃出基准目录
-	if strings.HasPrefix(clean, "..") {
-		return "", fmt.Errorf("名单路径不允许越出基准目录：%q", name)
-	}
 	if base == "" {
 		base = "."
 	}
-	return filepath.Join(base, clean), nil
+	absBase, err := filepath.Abs(base)
+	if err != nil {
+		return "", fmt.Errorf("规则目录不可用：%w", err)
+	}
+	p := name
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(absBase, p)
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", fmt.Errorf("名单路径不可用：%w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
+	if !withinDir(absBase, abs) {
+		return "", fmt.Errorf("名单文件必须放在规则目录内：%q", name)
+	}
+	return abs, nil
+}
+
+// withinDir 判断 p 是否在 dir 之内（dir 本身算在内）。
+func withinDir(dir, p string) bool {
+	rel, err := filepath.Rel(dir, p)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return !filepath.IsAbs(rel)
 }
 
 func loadLines(base, name string) ([][]byte, error) {

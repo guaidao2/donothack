@@ -762,7 +762,7 @@ func (s *Server) handleRulesValidate(w http.ResponseWriter, r *http.Request) {
 		Name string `json:"name"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON", err.Error())
+		s.writeError(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON", sanitizeDetail(err.Error()))
 		return
 	}
 	if strings.TrimSpace(req.YAML) == "" {
@@ -781,7 +781,7 @@ func (s *Server) handleRulesValidate(w http.ResponseWriter, r *http.Request) {
 		// 这里给 422 让 CLI 也能靠状态码判断。
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
 			"ok": false, "error": map[string]any{
-				"code": "invalid_rules", "message": "规则校验未通过", "detail": err.Error(),
+				"code": "invalid_rules", "message": "规则校验未通过", "detail": sanitizeDetail(err.Error()),
 			},
 		})
 		return
@@ -811,7 +811,7 @@ func (s *Server) handleRulesTest(w http.ResponseWriter, r *http.Request) {
 		Value  string `json:"value"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON", err.Error())
+		s.writeError(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON", sanitizeDetail(err.Error()))
 		return
 	}
 	snap := s.o.Control.Snapshot()
@@ -1628,4 +1628,28 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// sanitizeDetail 收口回给界面的错误详情：去不可打印字符并限长。
+//
+// 校验接口要把"哪里写错了"说清楚（规则测试台就是干这个的），但绝不能把
+// 文件内容、控制字符这类原样带出去 —— 报错里出现主机文件的一行，
+// 一个校验请求就变成了读文件的原语。
+func sanitizeDetail(s string) string {
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if r == '\n' || r == '\t' || (r >= 0x20 && r != 0x7f) {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte(' ')
+		}
+		if b.Len() >= 400 {
+			b.WriteString("…")
+			break
+		}
+	}
+	return b.String()
 }

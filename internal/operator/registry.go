@@ -251,7 +251,7 @@ func registerNetworkOps() {
 
 func buildIPMatch(items []string) (Compiled, error) {
 	out := make([]netip.Prefix, 0, len(items))
-	for _, s := range items {
+	for idx, s := range items {
 		s = strings.TrimSpace(s)
 		if s == "" {
 			continue
@@ -262,7 +262,7 @@ func buildIPMatch(items []string) (Compiled, error) {
 		}
 		addr, err := netip.ParseAddr(s)
 		if err != nil {
-			return nil, fmt.Errorf("%q 既不是 CIDR 也不是 IP", s)
+			return nil, fmt.Errorf("名单第 %d 行既不是 CIDR 也不是 IP", idx+1)
 		}
 		out = append(out, netip.PrefixFrom(addr, addr.BitLen()))
 	}
