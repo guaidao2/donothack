@@ -237,13 +237,26 @@ kbd {
 }
 
 .nav__dot {
+  /* 没有图标的兜底圆点：盒子必须和 .nav__icon 一样是 16px，
+     否则这一行的文字会比其它行左移 11px（加导航忘配图标时就会这样歪）。 */
+  position: relative;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  opacity: 0.4;
+  transition: opacity var(--dur) var(--ease);
+}
+
+.nav__dot::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
   width: 5px;
   height: 5px;
+  margin: -2.5px 0 0 -2.5px;
   border-radius: 50%;
   background: currentColor;
-  opacity: 0.4;
-  flex: none;
-  transition: opacity var(--dur) var(--ease);
 }
 
 .nav__item:hover .nav__dot,

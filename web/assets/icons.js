@@ -61,6 +61,12 @@ const NAV_ICONS = {
     svgEl('rect', { attrs: { x: '5', y: '5.5', width: '14', height: '15.5', rx: '2.2', ...s } }),
     svgEl('path', { attrs: { d: 'M9 12h6M9 16h4', ...s } }),
   ],
+  // 拦截页：一页纸 + 禁止符（终端用户看到的那一页）
+  page: (s) => [
+    svgEl('rect', { attrs: { x: '4.6', y: '3', width: '14.8', height: '18', rx: '2.2', ...s } }),
+    svgEl('circle', { attrs: { cx: '12', cy: '12', r: '3.6', ...s } }),
+    svgEl('path', { attrs: { d: 'M9.6 14.4l4.8-4.8', ...s } }),
+  ],
 };
 
 // 路由 → 图标名。放在这里而不是散在 app.js，是为了让"加了导航却忘了图标"一眼可见。
@@ -72,6 +78,7 @@ const ROUTE_ICON = {
   '/exceptions': 'funnel',
   '/ratelimit': 'gauge',
   '/settings': 'gear',
+  '/blockpage': 'page',
   '/audit': 'clipboard',
 };
 
