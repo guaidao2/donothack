@@ -203,10 +203,10 @@ export function render(container) {
       body: [
         toolbar(
           el('div', { class: 'field' }, el('span', { class: 'field__label', text: '时间范围' }), selectInput(RANGE_OPTIONS, { value: filters.range, onChange: (v) => { filters.range = v; load(true); } })),
-          el('div', { class: 'field' }, el('span', { class: 'field__label', text: '操作人' }), textInput({ value: filters.actor, placeholder: '精确匹配 actor', onEnter: (v) => { filters.actor = v; load(true); } })),
-          el('div', { class: 'field' }, el('span', { class: 'field__label', text: '动作' }), textInput({ value: filters.action, placeholder: '如 rules.disable', onEnter: (v) => { filters.action = v; load(true); } })),
-          el('div', { class: 'field' }, el('span', { class: 'field__label', text: '目标' }), textInput({ value: filters.target, placeholder: '如 SQLI-942100', onEnter: (v) => { filters.target = v; load(true); } })),
-          el('div', { class: 'field' }, el('span', { class: 'field__label', text: '结果' }), textInput({ value: filters.result, placeholder: 'ok / denied / error', onEnter: (v) => { filters.result = v; load(true); } })),
+          el('div', { class: 'field' }, el('span', { class: 'field__label', text: '操作人' }), textInput({ value: filters.actor, placeholder: '精确匹配 actor', onInput: (v) => { filters.actor = v; }, onEnter: (v) => { filters.actor = v; load(true); } })),
+          el('div', { class: 'field' }, el('span', { class: 'field__label', text: '动作' }), textInput({ value: filters.action, placeholder: '如 rules.disable', onInput: (v) => { filters.action = v; }, onEnter: (v) => { filters.action = v; load(true); } })),
+          el('div', { class: 'field' }, el('span', { class: 'field__label', text: '目标' }), textInput({ value: filters.target, placeholder: '如 SQLI-942100', onInput: (v) => { filters.target = v; }, onEnter: (v) => { filters.target = v; load(true); } })),
+          el('div', { class: 'field' }, el('span', { class: 'field__label', text: '结果' }), textInput({ value: filters.result, placeholder: 'ok / denied / error', onInput: (v) => { filters.result = v; }, onEnter: (v) => { filters.result = v; load(true); } })),
           button('查询', { size: 'sm', tone: 'primary', onClick: () => load(true) })
         ),
         tableHost,

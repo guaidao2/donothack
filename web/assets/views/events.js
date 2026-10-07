@@ -114,6 +114,8 @@ function renderList(container, ctx) {
 
   const tableHost = el('div');
 
+  // 注意：文本框必须 onInput 就写入筛选状态，只在 onEnter 里写是不够的 ——
+  // “填好 IP 再点查询”是正常用法，而那时 filters.ip 还是空的，条件会被静默丢掉。
   function params() {
     // 发**规范参数名**：后端对 ip/client_ip 与 rule/rule_id 两种写法都收，
     // 但前端没有理由继续发别名 —— 曾经因为两边名字不一致，填了客户端 IP
@@ -282,9 +284,9 @@ function renderList(container, ctx) {
         toolbar(
           el('div', { class: 'field' }, el('span', { class: 'field__label', text: '时间范围' }), selectInput(RANGE_OPTIONS, { value: filters.range, onChange: (v) => { filters.range = v; load(true); } })),
           el('div', { class: 'field' }, el('span', { class: 'field__label', text: '裁决' }), selectInput(VERDICT_OPTIONS, { value: filters.verdict, onChange: (v) => { filters.verdict = v; load(true); } })),
-          el('div', { class: 'field' }, el('span', { class: 'field__label', text: '类目' }), textInput({ value: filters.category, placeholder: '如 sqli', onEnter: (v) => { filters.category = v; load(true); } })),
-          el('div', { class: 'field' }, el('span', { class: 'field__label', text: '规则 ID' }), textInput({ value: filters.rule, placeholder: '如 SQLI-942100', onEnter: (v) => { filters.rule = v; load(true); } })),
-          el('div', { class: 'field' }, el('span', { class: 'field__label', text: '客户端 IP' }), textInput({ value: filters.ip, placeholder: '精确匹配', onEnter: (v) => { filters.ip = v; load(true); } })),
+          el('div', { class: 'field' }, el('span', { class: 'field__label', text: '类目' }), textInput({ value: filters.category, placeholder: '如 sqli', onInput: (v) => { filters.category = v; }, onEnter: (v) => { filters.category = v; load(true); } })),
+          el('div', { class: 'field' }, el('span', { class: 'field__label', text: '规则 ID' }), textInput({ value: filters.rule, placeholder: '如 SQLI-942100', onInput: (v) => { filters.rule = v; }, onEnter: (v) => { filters.rule = v; load(true); } })),
+          el('div', { class: 'field' }, el('span', { class: 'field__label', text: '客户端 IP' }), textInput({ value: filters.ip, placeholder: '精确匹配', onInput: (v) => { filters.ip = v; }, onEnter: (v) => { filters.ip = v; load(true); } })),
           el('div', { class: 'field toolbar__grow' }, el('span', { class: 'field__label', text: '路径' }), textInput({ value: filters.path, placeholder: '前缀或精确匹配', onInput: (v) => { filters.path = v; applyFilter(); } })),
           el('div', { class: 'field' }, el('span', { class: 'field__label', text: '每页' }), selectInput(LIMIT_OPTIONS, { value: String(filters.limit), onChange: (v) => { filters.limit = Number(v); load(true); } })),
           button('查询', { size: 'sm', tone: 'primary', onClick: () => load(true) })

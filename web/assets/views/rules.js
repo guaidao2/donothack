@@ -450,11 +450,11 @@ export function render(container, ctx) {
       flush: true,
       body: [
         toolbar(
-          el('div', { class: 'field toolbar__grow' }, el('span', { class: 'field__label', text: '关键词' }), textInput({ value: filters.q, placeholder: '规则 ID 或描述', onEnter: (v) => { filters.q = v; load(); } })),
-          el('div', { class: 'field' }, el('span', { class: 'field__label', text: '类目' }), textInput({ value: filters.category, placeholder: '如 sqli', onEnter: (v) => { filters.category = v; load(); } })),
+          el('div', { class: 'field toolbar__grow' }, el('span', { class: 'field__label', text: '关键词' }), textInput({ value: filters.q, placeholder: '规则 ID 或描述', onInput: (v) => { filters.q = v; }, onEnter: (v) => { filters.q = v; load(); } })),
+          el('div', { class: 'field' }, el('span', { class: 'field__label', text: '类目' }), textInput({ value: filters.category, placeholder: '如 sqli', onInput: (v) => { filters.category = v; }, onEnter: (v) => { filters.category = v; load(); } })),
           el('div', { class: 'field' }, el('span', { class: 'field__label', text: '严重度' }), selectInput(SEVERITY_OPTIONS, { value: filters.severity, onChange: (v) => { filters.severity = v; load(); } })),
           el('div', { class: 'field' }, el('span', { class: 'field__label', text: '状态' }), selectInput(ENABLED_OPTIONS, { value: filters.enabled, onChange: (v) => { filters.enabled = v; load(); } })),
-          el('div', { class: 'field' }, el('span', { class: 'field__label', text: '来源文件' }), textInput({ value: filters.file, placeholder: '按文件过滤', onEnter: (v) => { filters.file = v; load(); } })),
+          el('div', { class: 'field' }, el('span', { class: 'field__label', text: '来源文件' }), textInput({ value: filters.file, placeholder: '按文件过滤', onInput: (v) => { filters.file = v; }, onEnter: (v) => { filters.file = v; load(); } })),
           button('查询', { size: 'sm', tone: 'primary', onClick: () => load() })
         ),
         tableHost,

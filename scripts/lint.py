@@ -288,6 +288,28 @@ def check_api_contract() -> bool:
     return proc.returncode == 0
 
 
+def check_filter_inputs_commit_on_input() -> bool:
+    """筛选文本框必须在输入时写入筛选状态，不能只等回车。
+
+    存在的理由：筛选框只挂了 onEnter（回车才写状态），而「查询」按钮读的是状态 ——
+    「填好条件再点查询」正是最正常的用法，那时状态还是空的，条件被静默丢掉，
+    界面照常显示全部结果（看着像没过滤，其实条件根本没发出去）。
+    事件页的客户端 IP、审计页的四个、规则页的三个都栽过这一处。
+    """
+    offenders = []
+    for f in sorted((ROOT / "web" / "assets" / "views").glob("*.js")):
+        for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            if "onEnter:" in line and "onInput:" not in line:
+                offenders.append(f"{f.name}:{i}")
+    if offenders:
+        print("  以下筛选文本框只在回车时提交，点查询会丢条件：")
+        for o in offenders:
+            print("    - " + o)
+        return False
+    print("  -> 通过（筛选文本框都在输入时写入筛选状态）")
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="donothack 提交前门禁")
     parser.add_argument("--skip-tests", action="store_true", help="跳过 go test")
@@ -303,6 +325,7 @@ def main() -> int:
     checks.append(("emoji / 装饰符号禁令", check_no_emoji))
     checks.append(("embed 目录一致性（web/ 必须全部进 git）", check_embed_tracked))
     checks.append(("控制台前后端参数契约（前端发的过滤条件后端必须读）", check_api_contract))
+    checks.append(("控制台筛选条件接线（文本框必须输入即提交）", check_filter_inputs_commit_on_input))
     checks.append(("热路径零分配门禁（BenchmarkEngine_NoMatch）", check_alloc_gate))
 
     failed = [name for name, fn in checks if not step(name, fn)]
