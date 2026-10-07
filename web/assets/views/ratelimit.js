@@ -230,9 +230,16 @@ export function render(container) {
       return;
     }
     const area = el('textarea', { attrs: { rows: '18', spellcheck: 'false' } });
+    // 只回填**可改**字段：GET 还会带 ban_window_s / ban_duration_s / stats 这些派生项，
+    // 摆进编辑框会让人以为也能改（后端会收下并忽略，但界面上不该出现）。
+    const EDITABLE = ['enabled', 'rps', 'burst', 'ban_after_hits', 'ban_window', 'ban_duration', 'whitelist'];
+    const draft = {};
+    for (const key of EDITABLE) {
+      if (current[key] !== undefined) draft[key] = current[key];
+    }
     let initial = '';
     try {
-      initial = JSON.stringify(current, null, 2);
+      initial = JSON.stringify(draft, null, 2);
     } catch (err) {
       initial = '';
     }
@@ -241,7 +248,9 @@ export function render(container) {
 
     await openDialog({
       title: '编辑限速配置',
-      description: 'PUT /ratelimit 是整体替换：这里提交的内容会成为新的阈值配置。保存前请确认字段完整。',
+      description:
+        'PUT /ratelimit：这里只列出可改的字段（enabled、rps、burst、ban_after_hits、' +
+        'ban_window、ban_duration、whitelist）。改完提交即成为新的阈值配置。',
       wide: true,
       body: el(
         'div',

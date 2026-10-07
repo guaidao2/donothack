@@ -233,8 +233,11 @@ function notifySection(host) {
     }
     editJsonDialog({
       title: '编辑通知配置',
-      description: 'PUT /notify：整体替换通知配置。',
-      value: current,
+      description:
+        'PUT /notify：只提交要改的字段。webhook 不写（或留空）= 保持原值，填 "" 清空，' +
+        '填完整地址才会替换 —— GET 返回的是脱敏地址，原样提交会被当成"未修改"。',
+      // 脱敏后的 webhook 不能回填：原样提交会让人以为在改地址，实际提交的是掩码。
+      value: { enabled: pick(current, ['enabled'], false) },
       errorHint: '请检查 JSON 语法',
       onSave: async (parsed) => {
         const result = await api.putNotify(parsed);

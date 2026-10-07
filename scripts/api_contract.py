@@ -177,6 +177,116 @@ def backend_accepted(handler: str) -> set[str]:
     return names
 
 
+def handler_source(handler: str) -> str:
+    """取出某个 handler 的函数体（与 backend_accepted 同一套匹配方式）。"""
+    for f in BACKEND.glob("*.go"):
+        if f.name.endswith("_test.go"):
+            continue
+        t = f.read_text(encoding="utf-8")
+        m = re.search(r"func \(s \*Server\) " + re.escape(handler) + r"\(([\s\S]*?)\n\}", t)
+        if m:
+            return m.group(0)
+    return ""
+
+
+def get_response_keys(handler: str) -> set[str]:
+    """handler 的 GET 分支里写进响应的**顶层**键。
+
+    顶层是与写接口对账的单位：嵌套对象（stats 之类）整体进整体出，不算一个字段。
+    只认两种写法：`out["k"] = ...` 与 `map[string]any{ "k": ... }` 里 depth==1 的键 ——
+    直接扫 `"k":` 会把嵌套 map 的子键（keys/banned/…）也算进来，变成一堆假问题。
+    """
+    src = handler_source(handler)
+    if not src:
+        return set()
+    i = src.find("case http.MethodGet")
+    if i < 0:
+        return set()
+    j = src.find("case http.Method", i + 10)
+    seg = src[i : j if j > 0 else len(src)]
+
+    keys = set(re.findall(r'\bout\["([a-z_][a-z0-9_]*)"\]\s*=', seg))
+    pos = 0
+    while True:
+        m = seg.find("map[string]any{", pos)
+        if m < 0:
+            break
+        start = seg.find("{", m)
+        depth = 0
+        k = start
+        end = len(seg)
+        found: set[str] = set()
+        while k < len(seg):
+            c = seg[k]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    end = k
+                    break
+            elif c == '"' and depth == 1:
+                km = re.match(r'"([a-z_][a-z0-9_]*)"\s*:', seg[k:])
+                if km:
+                    found.add(km.group(1))
+                    k += len(km.group(0)) - 1
+            k += 1
+        pos = end + 1
+        if found:
+            # 第一段**非空**的响应 map 就是响应形状；嵌套 map（stats 之类）不再单独取键。
+            keys |= found
+            break
+    return keys
+
+
+def write_request_keys(handler: str) -> set[str]:
+    """handler 的解码结构体里的 json 标签 —— 严格解码下这就是白名单。"""
+    src = handler_source(handler)
+    return set(re.findall(r'`json:"([^",]+)', src)) if src else set()
+
+
+# "编辑整份配置"的端点对：控制台把 GET 的响应回填进编辑框、再整体提交。
+# 判据：**GET 会发的每个顶层字段，写接口的解码结构体里必须都有** —— 没有白名单、
+# 没有"忽略列表"。派生/只读字段（stats、ban_window_s 之类）也要写进结构体里收下，
+# 那正是"读回来能原样提交"这条预期的实现方式。
+#
+# 为什么不留忽略列表：第一版留了，结果它把要抓的东西放过了 ——
+# 清空后端兼容字段、门禁照样绿，因为忽略列表正好覆盖了那几个名字。
+#（同一个坑在 SSE 事件名门禁上踩过一次：只要存在能容纳错误写法的白名单分支，
+# 就要问自己"这个分支是不是正好放过我要抓的"。）
+#
+# 不钉这条会怎样（本轮真实发生）：GET /ratelimit 多了 ban_window_s / ban_duration_s /
+# stats，用户只是改了一个数字就得到"请求体不是合法 JSON"，看着像格式错误。
+ROUNDTRIP = [
+    ("/ratelimit", "/ratelimit"),
+    ("/notify", "/notify"),
+]
+
+
+def roundtrip_problems() -> list[str]:
+    problems: list[str] = []
+    routes = route_handlers()
+    for get_path, put_path in ROUNDTRIP:
+        get_handler = routes.get(get_path)
+        put_handler = routes.get(put_path)
+        if not get_handler or not put_handler:
+            problems.append(f"{get_path} / {put_path}：路由对不上，无法判定（未知≠通过）")
+            continue
+        emitted = get_response_keys(get_handler)
+        accepted = write_request_keys(put_handler)
+        if not emitted or not accepted:
+            problems.append(f"{get_path} / {put_path}：字段解析不出来，无法判定（未知≠通过）")
+            continue
+        missing = sorted(emitted - accepted)
+        if missing:
+            problems.append(
+                f"{put_path}（{put_handler}）：GET 会发但这些字段写接口不收 —— "
+                + ", ".join(missing)
+                + "；派生/只读字段也要在解码结构体里收下并忽略，否则编辑框读回来改一下再提交会报格式错误"
+            )
+    return problems
+
+
 def main() -> int:
     routes = route_handlers()
     sent, unresolved_paths = frontend_sent()
@@ -201,12 +311,19 @@ def main() -> int:
     if checked == 0:
         print("  -> 失败：一个端点都没对上，说明门禁自己坏了（不是通过）")
         return 1
+
+    # 第二块：编辑往返契约（GET 回填 → 整体提交）
+    roundtrip = roundtrip_problems()
+    print(f"  编辑往返端点对：{len(ROUNDTRIP)}")
+    if roundtrip:
+        problems.extend(roundtrip)
+
     if problems:
         print("  前端过滤条件问题：")
         for p in problems:
             print("    - " + p)
         return 1
-    print("  -> 通过（前端发送的查询参数后端都有对应读取）")
+    print("  -> 通过（前端发送的查询参数后端都有对应读取；编辑往返字段也对得上）")
     return 0
 
 

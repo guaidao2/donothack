@@ -1072,6 +1072,12 @@ func (s *Server) handleRateLimit(w http.ResponseWriter, r *http.Request) {
 			BanWindow    *string   `json:"ban_window"`
 			BanDuration  *string   `json:"ban_duration"`
 			Whitelist    *[]string `json:"whitelist"`
+			// 下面三个是 GET 里的派生字段（秒数形式与运行统计）。控制台的编辑框会把读到的
+			// 整份配置回填、再整体提交，所以这里必须**收下并忽略**：否则用户只是改了一个
+			// 数字，就会看到"请求体不是合法 JSON"，像格式错了一样。
+			BanWindowS   *int `json:"ban_window_s"`
+			BanDurationS *int `json:"ban_duration_s"`
+			Stats        any  `json:"stats"`
 		}
 		if err := decodeJSON(r, &req); err != nil {
 			s.writeError(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON", err.Error())

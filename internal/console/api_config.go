@@ -446,6 +446,10 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Enabled *bool   `json:"enabled"`
 			Webhook *string `json:"webhook"`
+			// GET 会带这两个（"是否已配置"与运行统计）：编辑框整份往返时要能收下，
+			// 否则原样提交会得到"请求体不是合法 JSON"。
+			WebhookConfigured *bool `json:"webhook_configured"`
+			Stats             any   `json:"stats"`
 		}
 		if err := decodeJSON(r, &req); err != nil {
 			s.writeError(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON", err.Error())
@@ -454,6 +458,16 @@ func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 		var warnings []string
 		if req.Enabled != nil {
 			s.o.Config.Alert.Enabled = *req.Enabled
+		}
+		if req.Webhook != nil {
+			wh := strings.TrimSpace(*req.Webhook)
+			// 防"把脱敏串写回配置"：GET 返回的 webhook 是脱敏过的（路径被截断成 …），
+			// 控制台编辑框整份往返时提交的就是它。值与当前配置的脱敏形态一致 → 视为
+			// **不修改**，否则一次"打开编辑框直接保存"就会把真地址替换成脱敏串。
+			if wh != "" && wh == redactWebhook(s.o.Config.Alert.Webhook) {
+				req.Webhook = nil
+				warnings = append(warnings, "webhook 提交的是脱敏后的原值，本次按未修改处理；要改请填完整地址")
+			}
 		}
 		if req.Webhook != nil {
 			wh := strings.TrimSpace(*req.Webhook)
