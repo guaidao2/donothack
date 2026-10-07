@@ -258,11 +258,15 @@ func get(ctx context.Context, hc *http.Client, url string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(resp.Body, maxFileBytes))
 }
 
-// LatestTag 从目录清单地址推断仓库，取"最新发布"的 tag。
+// apiBase 是 GitHub API 的基点。声明成变量是为了测试能指向本地假远端。
+var apiBase = "https://api.github.com"
+
+// LatestTag 取仓库里**最新的版本标签**。
 //
-// 为什么默认跟发布而不是默认分支：默认分支上随时可能是半成品提交，
-// 而 tag 是发布前跑过规则自测、语料与门禁的那个状态。
-// 推不出仓库（例如指向内网镜像）或请求失败都返回错误，调用方退回默认分支。
+// 为什么用 tags 而不是 releases/latest：只打 tag、不发 Release 是合法用法
+// （例如只想让别人同步规则，不挂二进制包）。只看 Release 会把这种情况卡在
+// "上一个已发布的版本"上 —— 用户以为同步到了最新规则，其实拿到的是旧的。
+// tags 取不到（例如镜像只暴露 releases）时，再退回最新发布。
 func LatestTag(ctx context.Context, hc *http.Client, contentsURL string) (string, error) {
 	base := strings.TrimSpace(contentsURL)
 	if base == "" {
@@ -279,7 +283,26 @@ func LatestTag(ctx context.Context, hc *http.Client, contentsURL string) (string
 	if hc == nil {
 		hc = &http.Client{Timeout: 30 * time.Second}
 	}
-	body, err := get(ctx, hc, "https://api.github.com/repos/"+parts[0]+"/"+parts[1]+"/releases/latest")
+	repoAPI := apiBase + "/repos/" + parts[0] + "/" + parts[1]
+
+	if body, err := get(ctx, hc, repoAPI+"/tags?per_page=100"); err == nil {
+		var tags []struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(body, &tags); err == nil {
+			best := ""
+			for _, t := range tags {
+				if newerTag(t.Name, best) {
+					best = t.Name
+				}
+			}
+			if best != "" {
+				return best, nil
+			}
+		}
+	}
+
+	body, err := get(ctx, hc, repoAPI+"/releases/latest")
 	if err != nil {
 		return "", err
 	}
@@ -293,6 +316,39 @@ func LatestTag(ctx context.Context, hc *http.Client, contentsURL string) (string
 		return "", fmt.Errorf("最新发布里没有 tag_name")
 	}
 	return rel.TagName, nil
+}
+
+// newerTag 判断 a 是否比 b 新。只比数字段（`v1.3.0` 与 `1.2.0` 都认），
+// 非数字后缀（`-rc1`）按同段处理 —— 用来挑"最新的版本标签"，不做严格 semver。
+func newerTag(a, b string) bool {
+	as, bs := tagParts(a), tagParts(b)
+	for i := 0; i < len(as) || i < len(bs); i++ {
+		var x, y int
+		if i < len(as) {
+			x = as[i]
+		}
+		if i < len(bs) {
+			y = bs[i]
+		}
+		if x != y {
+			return x > y
+		}
+	}
+	return false
+}
+
+func tagParts(s string) []int {
+	s = strings.TrimPrefix(strings.TrimSpace(s), "v")
+	segs := strings.Split(s, ".")
+	out := make([]int, 0, len(segs))
+	for _, seg := range segs {
+		n := 0
+		for i := 0; i < len(seg) && seg[i] >= '0' && seg[i] <= '9'; i++ {
+			n = n*10 + int(seg[i]-'0')
+		}
+		out = append(out, n)
+	}
+	return out
 }
 
 // LastResult 是最近一次同步的结果。

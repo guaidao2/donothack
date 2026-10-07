@@ -633,9 +633,9 @@ func runRulesSyncCmd(args []string) int {
 	if strings.TrimSpace(*ref) == "" {
 		if tag, err := rulessync.LatestTag(ctx, hc, *source); err == nil {
 			src.Ref = tag
-			fmt.Printf("同步目标：最新发布 %s\n", tag)
+			fmt.Printf("同步目标：最新 tag %s\n", tag)
 		} else {
-			fmt.Printf("取最新发布 tag 失败（%v），改用默认分支\n", err)
+			fmt.Printf("取最新 tag 失败（%v），改用默认分支\n", err)
 		}
 	}
 	files, listURL, err := rulessync.Fetch(ctx, src, hc)
