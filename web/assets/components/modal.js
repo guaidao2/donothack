@@ -69,7 +69,17 @@ export function openDialog(spec = {}) {
     });
     const form = el('form', { attrs: { novalidate: 'novalidate' } });
 
-    form.appendChild(el('div', { class: 'modal__head', text: spec.title || '' }));
+    const head = el('div', { class: 'modal__head' });
+    head.appendChild(el('span', { text: spec.title || '' }));
+    // 头部也放一个关闭：弹窗很高时，底部的按钮可能不在视野里（这是"关不掉"的常见原因）
+    head.appendChild(
+      button('关闭', {
+        tone: 'ghost',
+        size: 'sm',
+        onClick: () => finish(null),
+      })
+    );
+    form.appendChild(head);
 
     const body = el('div', { class: 'modal__body' });
     if (spec.description) body.appendChild(el('p', { class: 'sm muted', text: spec.description }));
@@ -99,6 +109,10 @@ export function openDialog(spec = {}) {
     form.appendChild(foot);
     box.appendChild(form);
     modal.appendChild(box);
+    // 点遮罩也关（点盒子内部不关）—— 这是最顺手的一条退路
+    modal.addEventListener('click', (event) => {
+      if (event.target === modal) finish(null);
+    });
 
     const previousFocus = document.activeElement;
     let done = false;

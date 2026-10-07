@@ -150,7 +150,12 @@ export function render(container) {
                 },
               })
             : el('div', { class: 'sm muted', text: '可视化预览暂不可用，下面是渲染结果源码。' }),
-          renderCode(vm.preview, { label: '渲染结果源码', meta: '服务端 html/template 输出' })
+          el(
+            'details',
+            { class: 'preview-source' },
+            el('summary', { text: '渲染结果源码（点开对照）' }),
+            renderCode(vm.preview, { label: '渲染结果源码', meta: '服务端 html/template 输出' })
+          )
         ),
         okText: '关闭',
       });
