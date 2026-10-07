@@ -651,6 +651,18 @@ var shellCommands = []string{
 
 // shellArgFollows 判断命令名后面是不是"真的到了命令边界"，
 // 而不是命令名的一部分（`ls` 不能匹配 `lsass`、`id` 不能匹配 `identity`）。
+// trimPathPrefix 去掉命令名前的路径前缀（`/bin/id` -> `id`）。
+// 只处理以 `/` 开头的一段，避免动到参数里的普通文本。
+func trimPathPrefix(s string) string {
+	if len(s) == 0 || s[0] != '/' {
+		return s
+	}
+	if k := strings.LastIndexByte(s, '/'); k >= 0 && k+1 < len(s) {
+		return s[k+1:]
+	}
+	return s
+}
+
 func shellArgFollows(after string) bool {
 	if after == "" {
 		return true
@@ -713,6 +725,9 @@ func (o shellCharsOp) Eval(_ *EvalCtx, in []byte) (Result, error) {
 			continue
 		}
 		rest := strings.TrimLeft(s[i+1:], " \t")
+		// 命令名前面可能带路径：`/bin/hostname`、`/usr/bin/id`（“分隔符后紧跟
+		// 命令名”的假设会被这种写法破坏）。先剥掉最后一段路径再比命令名。
+		rest = trimPathPrefix(rest)
 		for _, cmd := range shellCommands {
 			if !strings.HasPrefix(rest, cmd) {
 				continue

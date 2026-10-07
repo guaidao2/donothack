@@ -512,3 +512,44 @@ rules:
         - "steps: 1; select the option below"
         - "Choose an item; update your profile"
         - "Please select; then confirm your choice"
+
+  - id: SQLI-4014
+    phase: 2
+    severity: critical
+    category: sqli
+    score: 5
+    message: "SQL 注入特征：引号后紧跟布尔运算符或未列入黑名单的关键字"
+    tags: [sqli, owasp-a03, quote-operator]
+    targets:
+      - collection: ARGS
+      - collection: REQUEST_BODY
+      - collection: REQUEST_URI
+      - collection: REQUEST_HEADERS
+      - collection: REQUEST_COOKIES
+    transforms:
+      - urlDecode
+      - urlDecode
+      - replaceComments
+      - compressWhitespace
+      - lowercase
+    operator:
+      name: regex
+      params:
+        pattern: "[0-9a-z_)\\]][\"']\\s*(?:or|and|xor|div|regexp|like|having|order\\s+by|union|select|sleep|benchmark)\\b|[0-9a-z_)\\]][\"']\\s*(?:\\|\\||\\|)\\s*[\\s(0-9]"
+    test:
+      positive:
+        - "1' or(1)#"
+        - "1' or--1#"
+        - "1' | (1)#"
+        - "1' ||(1)#"
+        - "1' having 1=1#"
+        - "1' order by 2#"
+        - "1' xor 1=1#"
+        - "1' div 1#"
+        - "1' regexp 1#"
+      negative:
+        - "it's a nice day outside"
+        - "she said \"or\" maybe"
+        - "the list's order by date is in the docs"
+        - "O'Brien sent the report"
+        - "value=42"

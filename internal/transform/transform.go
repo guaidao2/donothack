@@ -556,6 +556,23 @@ func init() {
 	//
 	// 只挂到**模式里不含引号**的 shell 规则上（6004/6005/6006/6013/6014）；
 	// 6003 的正则本身就带引号转义，挂上去会自毁。
+	// removeShellEscapes 去掉反斜杠转义：shell 会把 `\x` 解释成 `x`，
+	// 于是 `i\d` 执行的是 `id`、`c\at` 执行的是 `cat`。
+	// 检测侧如果只在原样字符串上匹配命令名，这类写法整条穿过。
+	Register("removeShellEscapes", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		if !hasByte(in, '\\') {
+			return in, nil
+		}
+		out := dst[:0]
+		for i := 0; i < len(in); i++ {
+			if in[i] == '\\' && i+1 < len(in) {
+				continue // 跳过反斜杠，保留被转义的字符
+			}
+			out = append(out, in[i])
+		}
+		return out, nil
+	})
+
 	Register("removeShellQuotes", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		if !hasByte(in, 39) && !hasByte(in, 34) {
 			return in, nil

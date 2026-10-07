@@ -52,11 +52,16 @@ rules:
       - urlDecode
       - urlDecode
       - normalizeIFS
+      - removeShellEscapes
+      - removeShellQuotes
       - lowercase
     operator:
       name: containsShellChars
     test:
       positive:
+        - "127.0.0.1;i\\d"
+        - "127.0.0.1;i'd'"
+        - "127.0.0.1;/bin/hostname"
         - "; cat /etc/passwd"
         - "| whoami"
         - "$(id)"
@@ -135,12 +140,14 @@ rules:
       - replaceComments
       # `${IFS}`/`$IFS` 先折成空格，下面的 \s+ 才认得出"命令 + 参数"的分隔
       - normalizeIFS
+      - removeShellEscapes
+      - removeShellQuotes
       - compressWhitespace
       - lowercase
     operator:
       name: regex
       params:
-        pattern: '[;&|]{1,2}[\s+]*(?:cat|tac|head|tail|more|less|ls|dir|find|locate|grep|egrep|fgrep|awk|sed|cut|sort|uniq|wc|strings|xxd|od|base64|md5sum|sha1sum|sha256sum|cp|mv|rm|mkdir|rmdir|touch|ln|chmod|chown|chgrp|tar|zip|unzip|gzip|gunzip|id|whoami|uname|hostname|w|who|ps|pwd|env|printenv|date|uptime|last|df|du|free|top|lsof|ss|ifconfig|ipconfig|ip|arp|route|netstat|systeminfo|tasklist|nslookup|dig|host|ping|traceroute|tracert|nmap|nc|ncat|telnet|ftp|ssh|scp|rsync|curl|wget|sh|bash|dash|zsh|ksh|csh|ash|busybox|python|python3|perl|ruby|php|node|nodejs|lua|java|gcc|make|cmd|powershell|pwsh|cscript|wscript|mshta|rundll32|regsvr32|certutil|bitsadmin|wmic|schtasks|reg|net|sc|kill|killall|pkill|sudo|su|systemctl|service|crontab|at|mount|umount|insmod|modprobe|docker|kubectl|git|vim|vi|nano|echo|printf|tee|xargs|eval|exec|source|export)[\s+]+[$/~.\-\x22\x27]|[;&|]{1,2}[\s+]*(?:wget|curl)[\s+]+https?://|[;&|]{1,2}[\s+]*(?:whoami|uname|hostname|ifconfig|ipconfig|netstat|tasklist|systeminfo|nslookup|ping|nmap|nc|ncat|bash|sh|cmd|powershell|python|perl|ruby|php|chmod|chown|mkfifo|rm|cp|mv|kill)\b|[;&|]{1,2}[\s+]*id[\s+]*(?:$|[;&|])'
+        pattern: '[;&|]{1,2}[\s+]*(?:[^\s;&|]*/)?(?:cat|tac|head|tail|more|less|ls|dir|find|locate|grep|egrep|fgrep|awk|sed|cut|sort|uniq|wc|strings|xxd|od|base64|md5sum|sha1sum|sha256sum|cp|mv|rm|mkdir|rmdir|touch|ln|chmod|chown|chgrp|tar|zip|unzip|gzip|gunzip|id|whoami|uname|hostname|w|who|ps|pwd|env|printenv|date|uptime|last|df|du|free|top|lsof|ss|ifconfig|ipconfig|ip|arp|route|netstat|systeminfo|tasklist|nslookup|dig|host|ping|traceroute|tracert|nmap|nc|ncat|telnet|ftp|ssh|scp|rsync|curl|wget|sh|bash|dash|zsh|ksh|csh|ash|busybox|python|python3|perl|ruby|php|node|nodejs|lua|java|gcc|make|cmd|powershell|pwsh|cscript|wscript|mshta|rundll32|regsvr32|certutil|bitsadmin|wmic|schtasks|reg|net|sc|kill|killall|pkill|sudo|su|systemctl|service|crontab|at|mount|umount|insmod|modprobe|docker|kubectl|git|vim|vi|nano|echo|printf|tee|xargs|eval|exec|source|export)[\s+]+[$/~.\-\x22\x27]|[;&|]{1,2}[\s+]*(?:wget|curl)[\s+]+https?://|[;&|]{1,2}[\s+]*(?:whoami|uname|hostname|ifconfig|ipconfig|netstat|tasklist|systeminfo|nslookup|ping|nmap|nc|ncat|bash|sh|cmd|powershell|python|perl|ruby|php|chmod|chown|mkfifo|rm|cp|mv|kill)\b|[;&|]{1,2}[\s+]*id[\s+]*(?:$|[;&|])'
     test:
       positive:
         - "; cat /etc/passwd"

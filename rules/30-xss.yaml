@@ -451,3 +451,70 @@ rules:
         - "the prototype design is ready for review"
         - "our constructor won the contract"
         - "the property listing was updated"
+
+  - id: XSS-5010
+    phase: 2
+    severity: high
+    category: xss
+    score: 5
+    message: "XSS 特征：标签内任意事件处理器属性（形状判定，不枚举处理器名）"
+    tags: [xss, owasp-a03, event-handler]
+    targets:
+      - collection: ARGS
+      - collection: REQUEST_BODY
+      - collection: REQUEST_COOKIES
+    transforms:
+      - urlDecode
+      - urlDecode
+      - urlDecodeUni
+      - htmlEntityDecode
+      - jsDecode
+      - compressWhitespace
+      - lowercase
+    operator:
+      name: regex
+      params:
+        pattern: "<[a-z][a-z0-9]*[^>]{0,200}\\son[a-z]{3,40}\\s*="
+    test:
+      positive:
+        - "<img src=x onerror=alert(1)>"
+        - "<svg onload=alert(1)>"
+        - "<div style=\"content-visibility:auto\" oncontentvisibilityautostatechange=alert(1)>"
+        - "<body onpageshow=alert(1)>"
+      negative:
+        - "<p>The button turns on when pressed</p>"
+        - "status: on = enabled"
+        - "<a href=\"/on=1\">x</a>"
+        - "<div class=\"card\"><span>Order 42</span></div>"
+
+  - id: XSS-5011
+    phase: 2
+    severity: high
+    category: xss
+    score: 5
+    message: "XSS 特征：伪协议内夹控制字符（浏览器会剥掉后还原为 javascript:）"
+    tags: [xss, owasp-a03, pseudo-protocol]
+    targets:
+      - collection: ARGS
+      - collection: REQUEST_BODY
+      - collection: REQUEST_COOKIES
+    transforms:
+      - urlDecode
+      - urlDecode
+      - urlDecodeUni
+      - htmlEntityDecode
+      - jsDecode
+      - lowercase
+    operator:
+      name: regex
+      params:
+        pattern: "[\"'(=/]java[\\x00-\\x20]{0,8}script\\s*:"
+    test:
+      positive:
+        - "<a href=\"java&#9;script:alert(1)\">x</a>"
+        - "\"java&#10;script:alert(1)\""
+        - "<img src=\"java&#13;script:alert(1)\">"
+      negative:
+        - "javascript is a programming language"
+        - "use java script: see the docs"
+        - "<a href=\"/docs/javascript\">js docs</a>"
