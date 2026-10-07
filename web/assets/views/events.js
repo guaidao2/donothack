@@ -226,10 +226,13 @@ function renderList(container, ctx) {
       notify.error('无法建立实时连接', { detail: String(err && err.message ? err.message : err) });
       return;
     }
-    stream.addEventListener('message', (event) => {
+    // 服务端发的是**命名事件**（`event: event` / `hello` / `bye`），这类事件不会触发
+    // `message` —— 只有不带 `event:` 字段的才走默认类型。以前只听 'message'，
+    // 于是连接是通的、开关也显示"已开启"，但永远没有事件进列表（实测"没反应"）。
+    const onStreamEvent = (sse) => {
       let payload = null;
       try {
-        payload = JSON.parse(event.data);
+        payload = JSON.parse(sse.data);
       } catch (err) {
         return;
       }
@@ -245,6 +248,14 @@ function renderList(container, ctx) {
         };
         paint();
       }
+    };
+    stream.addEventListener('event', onStreamEvent);
+    stream.addEventListener('message', onStreamEvent); // 兼容未命名事件
+    stream.addEventListener('bye', () => {
+      // 服务端 30 分钟后主动收尾；开关要跟着回到关闭，别留个"开着但已断"的状态。
+      notify.info('实时连接已到时限（30 分钟），需要继续请重新开启');
+      stopStream();
+      ui.set({ streamEnabled: false });
     });
     stream.addEventListener('error', () => {
       /* EventSource 会自动重连；不在这里刷屏提示。 */
