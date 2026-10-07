@@ -328,6 +328,40 @@
   font-weight: 620;
 }
 
+/* 分段控件：用于"三选一"这种就地切换（运行模式）。
+   不加这一段的话，它会继承标签页的下边框与负 margin，跟下面那行文字挤在一起。 */
+.tabs--segmented {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  width: fit-content;
+  border: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  margin-bottom: var(--sp-3);
+}
+
+.tabs--segmented .tabs__item {
+  border: none;
+  margin-bottom: 0;
+  border-radius: calc(var(--radius-sm) - 3px);
+  padding: 6px var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.tabs--segmented .tabs__item:hover {
+  background: var(--bg-hover);
+}
+
+.tabs--segmented .tabs__item[aria-selected="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 620;
+}
+
 /* ── 抽屉 ───────────────────────────────────────────────────── */
 
 .scrim {
@@ -674,6 +708,7 @@
   flex-direction: column;
   gap: 4px;
   min-width: 140px;
+  max-width: 520px;
 }
 
 /* 一行：左边说这是什么，右边是数值，下面才是条子 */
@@ -696,14 +731,16 @@
 
 .meter__svg {
   width: 100%;
-  height: 8px;
+  height: 12px;
   display: block;
 }
 
+/* 轨道要看得见：深色底下用 bg-sunken 等于没有底 —— 整条只显出左边那一小块，
+   看着就像坏了。改成一点微亮的底 + 细边框。 */
 .meter__track-rect {
-  fill: var(--bg-sunken);
+  fill: var(--bg-active);
   stroke: var(--border);
-  stroke-width: 0.5;
+  stroke-width: 0.6;
 }
 
 .meter__fill-rect {

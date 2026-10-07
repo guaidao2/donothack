@@ -296,7 +296,6 @@ export const api = {
   engine: () => request('/engine'),
   setEngine: (body) => request('/engine', { method: 'PUT', body: body }),
 
-  /* 门槛 */
 
   /* 状态与指标 */
   status: () => request('/status'),

@@ -56,8 +56,6 @@ function yesNo(value, tones) {
   return badge(value ? '是' : '否', value ? tone.yes : tone.no);
 }
 
-/* ── 门槛 ───────────────────────────────────────────────────── */
-
 /* ── 认证 ───────────────────────────────────────────────────── */
 
 function authSection(host) {
@@ -737,7 +735,7 @@ export function render(container) {
 
   page.appendChild(
     pageHeader('系统设置', {
-      subtitle: '门槛 / 认证 / 通知 / 日志与配置 / 备份；所有写操作都会记入操作审计',
+      subtitle: '认证 / 通知 / 日志与配置 / 备份 / 版本；所有写操作都会记入操作审计',
     })
   );
 

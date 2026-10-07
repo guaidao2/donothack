@@ -102,7 +102,54 @@ func TestEngineEndpointEmptyBodyIsReadNotWrite(t *testing.T) {
 	}
 }
 
-// 没有会话/CSRF 的写请求必须被拦 —— 新端点不能成为绕过写防护的后门。
+// 真机上被指出来的 bug：在控制台切到 block 之后，"运行模式"卡显示 block，
+// 而"概览"（`/status`）还写着 detect —— 因为两处各读各的来源
+// （控制面 State vs 内存里的 Config 对象）。
+//
+// 这条测试把"只有一份真值"钉住：切完模式，所有对外读数必须一致。
+func TestEngineSwitchIsReflectedInStatusAndConfig(t *testing.T) {
+	s := newTestConsole(t)
+	if w, _ := engineRequest(t, s, http.MethodPut,
+		`{"mode":"block","inbound_anomaly_threshold":9}`); w.Code != http.StatusOK {
+		t.Fatalf("切模式应 200，实际 %d：%s", w.Code, w.Body.String())
+	}
+	id, _, err := s.session.create("admin", "127.0.0.1", "test", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := func(path string, fn http.HandlerFunc) string {
+		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:18081"+path, nil)
+		req.Host = "127.0.0.1:18081"
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: id})
+		rec := httptest.NewRecorder()
+		fn(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s 应 200，实际 %d：%s", path, rec.Code, rec.Body.String())
+		}
+		return rec.Body.String()
+	}
+
+	status := read("/api/v1/status", s.handleStatus)
+	if !strings.Contains(status, `"mode":"block"`) {
+		t.Errorf("/status 应报 block（概览读它），实际 %s", firstN(status, 160))
+	}
+	cfg := read("/api/v1/config", s.handleConfig)
+	if !strings.Contains(cfg, `"mode":"block"`) {
+		t.Errorf("/config 的 engine.mode 应为 block，实际 %s", firstN(cfg, 200))
+	}
+	// 运行模式卡自己读的那份也必须一致（同一个真值，三处读数相同）。
+	eng, _ := engineRequest(t, s, http.MethodGet, "")
+	if !strings.Contains(eng.Body.String(), `"mode":"block"`) {
+		t.Errorf("/engine 应报 block，实际 %s", firstN(eng.Body.String(), 160))
+	}
+}
+
+func firstN(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
 func TestEngineEndpointStillRequiresCSRF(t *testing.T) {
 	s := newTestConsole(t)
 

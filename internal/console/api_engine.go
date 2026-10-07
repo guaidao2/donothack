@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"donothack/internal/config"
 	"donothack/internal/control"
 )
 
@@ -103,5 +104,36 @@ func (s *Server) engineWrite(w http.ResponseWriter, r *http.Request) {
 	}
 	out := enginePayload(next.Engine)
 	out["warnings"] = warnings
+	// **把热改结果同步回内存里的配置对象。**
+	//
+	// 这一步必须做：`/status`、`/config` 以及"磁盘 vs 运行中"的差异都读内存里的
+	// Config 对象。不同步就会出现"运行模式卡写着 block、概览还写着 detect"这种
+	// 两个真值来源各说各话的情况（实测被指出来过）。
+	//
+	// 注意这只是内存视图：磁盘上的 config.yaml 没动，重启会回到文件里的值 ——
+	// 差异页会如实显示这一点，这正是我们想让人看到的。
+	syncEngineConfig(s.o.Config, next.Engine)
 	writeJSON(w, http.StatusOK, out)
+}
+
+// syncEngineConfig 把控制面里的引擎热参数写回内存配置对象。
+func syncEngineConfig(cfg *config.Config, e control.EngineState) {
+	if cfg == nil {
+		return
+	}
+	cfg.Engine.Mode = e.Mode
+	cfg.Engine.InboundAnomalyThreshold = e.InboundThreshold
+	cfg.Engine.BanOnBlock = e.BanOnBlock
+	cfg.Engine.BlockBanDuration = config.Duration(e.BlockBanDuration)
+	// 类目阈值整份替换：热改的语义就是"这次给的就是全部"。
+	// 空则清掉，免得磁盘上已删掉的类目在内存里留着。
+	if len(e.CategoryThresholds) == 0 {
+		cfg.Engine.CategoryThresholds = nil
+		return
+	}
+	cats := make(map[string]int, len(e.CategoryThresholds))
+	for k, v := range e.CategoryThresholds {
+		cats[k] = v
+	}
+	cfg.Engine.CategoryThresholds = cats
 }

@@ -619,7 +619,7 @@ kbd {
   }
 }
 
-/* 单列模式（会话读取失败、门槛未过这类整屏状态）：把那张卡拉到中间就好 */
+/* 单列模式（会话读取失败这类整屏状态）：把那张卡拉到中间就好 */
 .gate--single {
   grid-template-columns: minmax(0, 1fr);
   place-items: center;

@@ -218,6 +218,15 @@ func (s *Server) handleConfigReload(w http.ResponseWriter, r *http.Request) {
 		}
 		applied = append(applied, "engine("+mode+")")
 		extraWarnings = append(extraWarnings, warns...)
+		// 内存配置对象同步成刚应用的值，免得 /status、/config 与差异页
+		// 拿旧值说话（那正是"运行模式显示 block、概览还是 detect"的成因）。
+		syncEngineConfig(s.o.Config, control.EngineState{
+			Mode:               disk.Engine.Mode,
+			InboundThreshold:   disk.Engine.InboundAnomalyThreshold,
+			CategoryThresholds: disk.Engine.CategoryThresholds,
+			BanOnBlock:         disk.Engine.BanOnBlock,
+			BlockBanDuration:   disk.Engine.BlockBanDuration.D(),
+		})
 	}
 
 	// 其余差异如实报告"需要重启"

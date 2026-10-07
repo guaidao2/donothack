@@ -494,6 +494,9 @@ export function meter(spec) {
   const max = toNumber(spec.max);
   const ratio = max && max > 0 ? Math.min(1, value / max) : 0;
   const tone = ratio >= 0.9 ? 'meter__fill--danger' : ratio >= 0.75 ? 'meter__fill--warn' : '';
+  // viewBox 高度与 CSS 高度对齐（12），圆角才不会被纵向拉变形；
+  // 横向用 preserveAspectRatio="none" 拉满，rx 在横向拉伸后是个圆头小药丸，正合适。
+  const h = 12;
   return el(
     'div',
     { class: 'meter' },
@@ -502,21 +505,25 @@ export function meter(spec) {
       {
         attrs: {
           class: 'meter__svg',
-          viewBox: '0 0 100 6',
+          viewBox: '0 0 100 ' + h,
           preserveAspectRatio: 'none',
           role: 'img',
           'aria-label': spec.ariaLabel || spec.label || fmtInt(value),
         },
       },
-      svgEl('rect', { attrs: { class: 'meter__track-rect', x: 0, y: 0, width: '100%', height: 6, rx: 3 } }),
+      svgEl('rect', {
+        attrs: { class: 'meter__track-rect', x: 0, y: 0, width: '100%', height: h, rx: h / 2 },
+      }),
       svgEl('rect', {
         attrs: {
           class: 'meter__fill-rect ' + tone,
           x: 0,
           y: 0,
-          width: ratio > 0 ? (ratio * 100).toFixed(2) + '%' : '0',
-          height: 6,
-          rx: 3,
+          // 极小占比也给 1.5% 的最小可见宽度：否则"有数据但看着是空的"，
+          // 运维分不清是没数据还是坏了。
+          width: ratio > 0 ? Math.max(ratio * 100, 1.5).toFixed(2) + '%' : '0',
+          height: h,
+          rx: h / 2,
         },
       })
     ),
