@@ -310,6 +310,61 @@ def check_filter_inputs_commit_on_input() -> bool:
     return True
 
 
+def check_sse_event_names() -> bool:
+    """前端监听的 SSE 事件名，必须是后端真的会发出的名字。
+
+    存在的理由：SSE 里只有**不带 `event:` 字段**的消息才走默认的 `message` 事件；
+    后端发命名事件（`event: event` / `hello` / `bye`）时，前端挂
+    `addEventListener('message', ...)` 永远收不到 —— 连接是通的、不报错、开关也
+    显示"已开启"，就是永远不刷新（v1.1.0 实测"实时推送没反应"就是这个）。
+    这类"名字对不上又不报错"的毛病靠人点界面很难发现，所以静态对一次账。
+    """
+    server = ROOT / "internal"
+    emitted: set[str] = set()
+    for f in server.rglob("*.go"):
+        if "_test" in f.name:
+            continue
+        text = f.read_text(encoding="utf-8", errors="replace")
+        # 只认 Go 字符串里形如 `event: 名字\ndata:` 的帧，避免误抓注释与普通文本
+        for m in re.finditer(r"event:\s*([A-Za-z][\w-]*)\\n\s*data:", text):
+            emitted.add(m.group(1))
+
+    if not emitted:
+        print("  -> 失败：一个后端 SSE 事件名都没解析出来，门禁自己坏了（不是通过）")
+        return False
+
+    # 后端会发、但前端可以不处理的事件名：连接握手帧，纯信息性。
+    ignorable = {"hello"}
+    # SSE 规范自带的事件名，不需要后端发。
+    standard = {"message", "open", "error"}
+
+    listened: set[str] = set()
+    pairs = []  # (文件:行, 名字) 供报错定位
+    for f in sorted((ROOT / "web" / "assets" / "views").glob("*.js")):
+        for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            for m in re.finditer(r"stream\.addEventListener\(\s*'([^']+)'", line):
+                listened.add(m.group(1))
+                pairs.append((f"{f.name}:{i}", m.group(1)))
+
+    # 反向：后端发了、前端没监听 —— 就是"开着但永远不刷新"那一类。
+    missing = sorted(n for n in emitted if n not in ignorable and n not in listened)
+    # 正向：前端监听了、后端从不发（含拼错名字）。
+    unknown = sorted(f"{loc} 监听 '{n}'，但后端没有发这个事件名"
+                     for loc, n in pairs if n not in standard and n not in emitted)
+
+    if missing or unknown:
+        if missing:
+            print("  后端会发这些事件，但前端没有任何 stream.addEventListener 监听：" + ", ".join(missing))
+        for u in unknown:
+            print("    - " + u)
+        print("    后端实际发出：" + ", ".join(sorted(emitted)))
+        print("    前端实际监听：" + (", ".join(sorted(listened)) or "（没有）"))
+        return False
+    print("  -> 通过（后端事件 %s；前端监听 %s）"
+          % (", ".join(sorted(emitted)), ", ".join(sorted(listened)) or "（无）"))
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="donothack 提交前门禁")
     parser.add_argument("--skip-tests", action="store_true", help="跳过 go test")
@@ -326,6 +381,7 @@ def main() -> int:
     checks.append(("embed 目录一致性（web/ 必须全部进 git）", check_embed_tracked))
     checks.append(("控制台前后端参数契约（前端发的过滤条件后端必须读）", check_api_contract))
     checks.append(("控制台筛选条件接线（文本框必须输入即提交）", check_filter_inputs_commit_on_input))
+    checks.append(("SSE 事件名契约（前端监听的必须后端真的发）", check_sse_event_names))
     checks.append(("热路径零分配门禁（BenchmarkEngine_NoMatch）", check_alloc_gate))
 
     failed = [name for name, fn in checks if not step(name, fn)]
