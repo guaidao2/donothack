@@ -54,3 +54,7 @@ config.local.yaml
 
 # codegraph 的本地索引（工具产物，不进版本库）
 /.codegraph/
+
+# Python 字节码缓存（可再生，不进仓库）
+__pycache__/
+*.pyc
