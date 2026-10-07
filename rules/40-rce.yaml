@@ -173,6 +173,9 @@ rules:
       - collection: ARGS
       - collection: REQUEST_BODY
       - collection: REQUEST_URI
+    # normalizeIFS 把 `$IFS` / `${IFS}` 折成空格：shell 里它们就是空格，
+    # 而 `certutil$IFS-urlcache` 这种形态让所有"带空格的字面量"全部失效
+    # （实测：这些规则以前都没有这道变换，只有 6001/6003 有）。
     # normalizePath 在这里的作用是折叠"重复斜杠 / 点段"这类等价写法：
     # `cmd //c whoami`、`whoami //all`、`rm -rf //`、`/etc//cron`、
     # `bitsadmin //transfer` —— 实测这些变体都能绕过纯字面量匹配。
@@ -182,6 +185,8 @@ rules:
     transforms:
       - urlDecode
       - urlDecode
+      - normalizeIFS
+      - removeShellQuotes
       - compressWhitespace
       - lowercase
       - normalizePath
@@ -258,6 +263,8 @@ rules:
     transforms:
       - urlDecode
       - urlDecode
+      - normalizeIFS
+      - removeShellQuotes
       - compressWhitespace
       - lowercase
       - normalizePath
@@ -319,6 +326,8 @@ rules:
     transforms:
       - urlDecode
       - urlDecode
+      - normalizeIFS
+      - removeShellQuotes
       - compressWhitespace
       - lowercase
       - normalizePath
@@ -619,6 +628,8 @@ rules:
     transforms:
       - urlDecode
       - urlDecode
+      - normalizeIFS
+      - removeShellQuotes
       - compressWhitespace
       - lowercase
       - normalizePath
@@ -684,6 +695,8 @@ rules:
     transforms:
       - urlDecode
       - urlDecode
+      - normalizeIFS
+      - removeShellQuotes
       - lowercase
     operator:
       name: pm

@@ -163,9 +163,17 @@ func (s *Server) URL() string {
 
 // ---------------------------------------------------------------- 路由
 
+// apiRoutePaths 记录注册过的 /api/v1/* 路径，只服务"所有 API 默认必须认证"的回归测试：
+// 以后新增路由会自动进入覆盖范围，不必手工维护清单（清单总会漏）。
+var apiRoutePaths []string
+
 func (s *Server) routes() {
 	mux := http.NewServeMux()
+	apiRoutePaths = apiRoutePaths[:0]
 	h := func(p string, fn http.HandlerFunc) {
+		if strings.HasPrefix(p, "/api/v1/") {
+			apiRoutePaths = append(apiRoutePaths, p)
+		}
 		mux.HandleFunc(p, fn)
 	}
 
@@ -235,9 +243,42 @@ func (s *Server) routes() {
 	s.mux = mux
 }
 
+// apiAuthAllowlist 是唯一允许匿名访问的 API 端点：登录本身。
+//
+// 别的东西一律要走会话 —— 白名单是**显式声明**的，新增路由默认受保护。
+var apiAuthAllowlist = map[string]bool{
+	"/api/v1/login": true,
+}
+
+// requireSessionForAPI 给所有 /api/v1/* 统一兜一层会话校验。
+//
+// 为什么要有这一层：`GET /api/v1/engine` 曾经漏挂 requireRead，匿名就能读到
+// 引擎参数（mode / 阈值 / 封禁时长）—— 同一批端点里只有它漏，因为校验是
+// **逐个 handler 手工挂**的，漏一个就是一个洞，而且不会自己暴露。
+// 兜上这层之后，漏挂只会得到 401，不会再对外泄数据；方法检查也拦不住它
+// （以前 POST-only 端点未认证时先回 405，现在先回 401）。
+func (s *Server) requireSessionForAPI(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		if strings.HasPrefix(p, "/api/v1/") {
+			trimmed := strings.TrimSuffix(p, "/")
+			if !apiAuthAllowlist[p] && !apiAuthAllowlist[trimmed] {
+				if _, ok := s.currentSession(r); !ok {
+					s.writeError(w, http.StatusUnauthorized, "unauthenticated", "需要先登录", "")
+					return
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // Handler 返回带完整防护链的处理器。
 func (s *Server) Handler() http.Handler {
-	return s.admissionMiddleware(s.mux)
+	// 认证兜底放在准入之后、mux 之前：所有 /api/v1/* 统一要求会话
+	// （唯一白名单是登录本身，见 apiAuthAllowlist）。
+	// 逐个 handler 手工挂校验的写法漏过一个（GET /engine），所以改成兜底。
+	return s.admissionMiddleware(s.requireSessionForAPI(s.mux))
 }
 
 // admissionMiddleware 是控制台唯一的准入层：**来源地址白名单**。

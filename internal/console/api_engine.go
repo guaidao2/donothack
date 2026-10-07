@@ -23,6 +23,11 @@ import (
 func (s *Server) handleEngine(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		// 读引擎参数同样要会话。这里曾经漏挂 —— 匿名就能拿到 mode / 阈值 /
+		// 封禁时长，等于把防护档位直接告诉攻击者（用来校准节奏）。
+		if !s.requireRead(w, r) {
+			return
+		}
 		s.engineRead(w)
 	case http.MethodPut, http.MethodPost:
 		s.engineWrite(w, r)

@@ -94,8 +94,17 @@ rules:
           - "%c0%ae%c0%ae"
           - "..%c0%af"
           - "..%00/"
+          # 过长短 UTF-8（老 IIS/Java 解码器把 %c0%af 当 `/`）
+          - "%c0%ae"
+          - "%c0%af"
+          - "%c0%2e"
+          - "%c0%5c"
+          - "%c1%9c"
+          - "%e0%80%af"
+          - "%f0%80%80%af"
     test:
       positive:
+        - "%c0%afetc%c0%af%c0%ae%c0%afpasswd"
         - "../../../etc/passwd"
         - "..%2f..%2f..%2fetc%2fpasswd"
         - "%2e%2e%2f%2e%2e%2fetc/passwd"

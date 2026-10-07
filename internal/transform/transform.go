@@ -547,6 +547,29 @@ func init() {
 	//
 	// **不要把它挂到"检测 ${IFS} 本身"的规则上** —— 那会把证据折掉，
 	// 与 compressWhitespace 把 `\n` 折成空格那次是同一类错误。
+	// removeShellQuotes 删掉引号字符（0x27 单引号、0x22 双引号）。
+	//
+	// shell 里引号是"拼接分隔符"，会被解释器消掉：`c''ertutil -urlcache` 与
+	// `certutil -urlcache`、`c'a't` 与 `cat` 执行的是同一个命令 ——
+	// 这是绕关键字黑名单的老手法，而带引号的形态配不上任何字面量
+	// （实测 `c''ertutil -urlcache …` 曾整条漏检）。
+	//
+	// 只挂到**模式里不含引号**的 shell 规则上（6004/6005/6006/6013/6014）；
+	// 6003 的正则本身就带引号转义，挂上去会自毁。
+	Register("removeShellQuotes", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		if !hasByte(in, 39) && !hasByte(in, 34) {
+			return in, nil
+		}
+		out := dst[:0]
+		for i := 0; i < len(in); i++ {
+			if in[i] == 39 || in[i] == 34 {
+				continue
+			}
+			out = append(out, in[i])
+		}
+		return out, nil
+	})
+
 	Register("normalizeIFS", func(dst, in []byte, _ kv.Params) ([]byte, error) {
 		if !hasByte(in, '$') {
 			return in, nil
