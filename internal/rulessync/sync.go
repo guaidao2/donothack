@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"donothack/internal/rules"
@@ -292,4 +293,39 @@ func LatestTag(ctx context.Context, hc *http.Client, contentsURL string) (string
 		return "", fmt.Errorf("最新发布里没有 tag_name")
 	}
 	return rel.TagName, nil
+}
+
+// LastResult 是最近一次同步的结果。
+//
+// 放在这个包里是因为它有两个读者：控制台的同步接口，和 /readyz ——
+// 失败必须两边都看得见，否则运维会以为"点了没反应"，而线上还在用旧规则。
+type LastResult struct {
+	At          time.Time `json:"at"`
+	OK          bool      `json:"ok"`
+	FromVersion string    `json:"from_version"`
+	ToVersion   string    `json:"to_version"`
+	Skipped     bool      `json:"skipped"`
+	Files       int       `json:"files"`
+	Source      string    `json:"source"`
+	Ref         string    `json:"ref"`
+	Error       string    `json:"error,omitempty"`
+}
+
+var lastState struct {
+	mu sync.Mutex
+	r  *LastResult
+}
+
+// SetLast 记录一次同步结果（控制台/CLI 共用）。
+func SetLast(r LastResult) {
+	lastState.mu.Lock()
+	lastState.r = &r
+	lastState.mu.Unlock()
+}
+
+// Last 返回最近一次同步结果；从未同步过时返回 nil。
+func Last() *LastResult {
+	lastState.mu.Lock()
+	defer lastState.mu.Unlock()
+	return lastState.r
 }

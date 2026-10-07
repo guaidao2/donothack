@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"donothack/internal/control"
@@ -12,38 +11,13 @@ import (
 	"donothack/internal/rulessync"
 )
 
-// rulesSyncReport 是最近一次同步的结果，供界面与 /readyz 展示。
-//
-// 为什么要有它：同步失败时必须看得见 —— 否则运维会以为"点了没反应"，
-// 而实际上还在用旧规则（这条产品的老毛病已经出现过好几次）。
-type rulesSyncReport struct {
-	At          time.Time `json:"at"`
-	OK          bool      `json:"ok"`
-	FromVersion string    `json:"from_version"`
-	ToVersion   string    `json:"to_version"`
-	Skipped     bool      `json:"skipped"`
-	Files       int       `json:"files"`
-	Source      string    `json:"source"`
-	Ref         string    `json:"ref"`
-	Error       string    `json:"error,omitempty"`
-}
+// rulesSyncReport 与最近一次结果的状态都放在 rulessync 包里 ——
+// 控制台与 /readyz 读同一份事实，避免"控制台说换了、readyz 说没换"。
+type rulesSyncReport = rulessync.LastResult
 
-var rulesSyncState struct {
-	mu   sync.Mutex
-	last *rulesSyncReport
-}
+func setRulesSyncReport(r rulesSyncReport) { rulessync.SetLast(r) }
 
-func setRulesSyncReport(r rulesSyncReport) {
-	rulesSyncState.mu.Lock()
-	rulesSyncState.last = &r
-	rulesSyncState.mu.Unlock()
-}
-
-func lastRulesSyncReport() *rulesSyncReport {
-	rulesSyncState.mu.Lock()
-	defer rulesSyncState.mu.Unlock()
-	return rulesSyncState.last
-}
+func lastRulesSyncReport() *rulesSyncReport { return rulessync.Last() }
 
 // handleRulesSync 是"手动同步规则集"的入口：GET 看状态，POST 执行一次。
 //

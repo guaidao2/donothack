@@ -19,6 +19,7 @@ import (
 	"donothack/internal/audit"
 	"donothack/internal/config"
 	"donothack/internal/profile"
+	"donothack/internal/rulessync"
 )
 
 // Options 是数据面服务器的构造参数。
@@ -276,6 +277,8 @@ type ReadyInfo struct {
 	// 日志侧的事实：丢弃、轮转、删除都必须能被看到。
 	// 否则出问题时只剩下"日志怎么少了一段"这种无法解释的现象。
 	Log *audit.Stats `json:"log,omitempty"`
+	// RulesSync 是最近一次规则同步的结果（未同步过则省略）。
+	RulesSync *rulessync.LastResult `json:"rules_sync,omitempty"`
 }
 
 // buildReadyInfo 组装就绪信息。
@@ -322,6 +325,7 @@ func (s *Server) buildReadyInfo(ok bool, detail string) ReadyInfo {
 		UptimeSeconds:   round2(time.Since(s.startedAt).Seconds()),
 		Degrade:         s.degradeInfo(),
 		Log:             s.logStats(),
+		RulesSync:       rulessync.Last(),
 	}
 }
 
