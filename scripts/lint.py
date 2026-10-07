@@ -65,7 +65,7 @@ def check_gofmt() -> bool:
 
     为什么较真：`.tmp/` 下放的是临时验证程序与联调产物（gitignore），
     给它们套 gofmt 会让门禁因为"别人的草稿没格式化"而红 —— 这次就真踩到了：
-    审计员在 `.tmp/audit/` 下留了 9 个一次性程序，门禁直接报未格式化。
+    `.tmp/audit/` 下若留了一次性程序，门禁会跟着报未格式化。
     门禁只该对**要交付的东西**说话。
     """
     skip = {".git", ".tmp", "dist", "bin", "node_modules"}
