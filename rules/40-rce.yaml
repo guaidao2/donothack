@@ -52,6 +52,7 @@ rules:
       - urlDecode
       - urlDecode
       - normalizeIFS
+      - expandShellVars
       - removeShellEscapes
       - removeShellQuotes
       - lowercase
@@ -821,3 +822,36 @@ rules:
         - "session=8f2b1c9d; theme=dark; lang=zh-CN"
         - "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif"
         - "gzip, deflate, br"
+
+  - id: RCE-6018
+    phase: 2
+    severity: high
+    category: rce
+    score: 5
+    message: "命令注入特征：IP/主机形参数值后跟 shell 分隔符与命令词"
+    tags: [rce, owasp-a03, structural]
+    targets:
+      - collection: ARGS
+      - collection: REQUEST_BODY
+      - collection: REQUEST_URI
+    transforms:
+      - urlDecode
+      - urlDecode
+      - normalizeIFS
+      - expandShellVars
+      - compressWhitespace
+      - lowercase
+    operator:
+      name: regex
+      params:
+        pattern: "(?:[0-9]{1,3}\\.){3}[0-9]{1,3}[ \\t+]*[;&|]{1,2}[ \\t+]*[a-z]"
+    test:
+      positive:
+        - "127.0.0.1;arch"
+        - "127.0.0.1;nproc"
+        - "127.0.0.1;getconf LONG_BIT"
+        - "10.0.0.1 | hostid"
+      negative:
+        - "10.0.0.1;10.0.0.2"
+        - "192.168.1.1 | 255.255.255.0"
+        - "resolver=8.8.8.8,1.1.1.1"

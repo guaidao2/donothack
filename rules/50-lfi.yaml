@@ -489,3 +489,38 @@ rules:
         - "https://api.example.com/v1/items"
         - "https://cdn.example.com/assets/logo.png"
         - "the internal wiki is at https://wiki.corp.example"
+
+  - id: LFI-7008
+    phase: 2
+    severity: high
+    category: lfi
+    score: 5
+    message: "路径包含特征：只可能是读取目标的系统文件（主机名/口令/计划任务/内核信息）"
+    tags: [lfi, owasp-a03, sensitive-file]
+    targets:
+      - collection: ARGS
+      - collection: REQUEST_BODY
+      - collection: REQUEST_URI
+      - collection: REQUEST_COOKIES
+    transforms:
+      - urlDecode
+      - urlDecode
+      - lowercase
+    operator:
+      name: regex
+      params:
+        pattern: "/(?:etc/(?:hostname|hosts|issue|mtab|crontab|shadow|gshadow|sudoers)|proc/(?:version|cmdline|self/(?:environ|cmdline|root))|root/\\.ssh|var/log/(?:auth|secure|messages))"
+    test:
+      positive:
+        - "/etc/hostname"
+        - "/etc/crontab"
+        - "/etc/hosts"
+        - "/proc/version"
+        - "/proc/self/environ"
+        - "/root/.ssh/id_rsa"
+        - "/var/log/auth.log"
+      negative:
+        - "/var/www/html/index.php"
+        - "/var/www/html/robots.txt"
+        - "/static/css/app.css"
+        - "hostname=web-01"

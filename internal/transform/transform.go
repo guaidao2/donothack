@@ -556,6 +556,104 @@ func init() {
 	//
 	// 只挂到**模式里不含引号**的 shell 规则上（6004/6005/6006/6013/6014）；
 	// 6003 的正则本身就带引号转义，挂上去会自毁。
+	// expandShellVars 处理 shell 的变量装配与替换。
+	//
+	// 为什么必须有：`a=id;$a` 执行的是 `id`，但字面 "id" 只出现在赋值里、
+	// 真正执行的位置是 `$a` —— 只看字面 token 的检测会整条穿过。
+	// 这里做两件事（都在同一遍里，输出写进调用方的 dst）：
+	//   1) 把简单的 `name=value` 赋值记下来，遇到 `$name` 用它替换 → 还原出真正的命令名；
+	//   2) shell 里会展开成空的东西直接去掉：`$@`、`$*`、`${...}`、未赋值的 `$name`
+	//      （`i$@d` 在 shell 里就是 `id`）。
+	// 没有 `$` 时立刻返回入参，热路径不留额外开销。
+	Register("expandShellVars", func(dst, in []byte, _ kv.Params) ([]byte, error) {
+		if !hasByte(in, '$') {
+			return in, nil
+		}
+		type assign struct{ name, val []byte }
+		var assigns [4]assign
+		nAssign := 0
+		// 收集赋值（值不含空白与 shell 分隔符，片段长度有上限）
+		for i := 0; i < len(in) && nAssign < len(assigns); i++ {
+			if !isNameStart(in[i]) {
+				continue
+			}
+			k := i
+			for k < len(in) && isNameChar(in[k]) {
+				k++
+			}
+			if k >= len(in) || in[k] != '=' || k-i > 32 {
+				continue
+			}
+			v := k + 1
+			e := v
+			for e < len(in) && !isShellDelim(in[e]) {
+				e++
+			}
+			if e-v > 256 {
+				continue
+			}
+			assigns[nAssign] = assign{name: in[i:k], val: in[v:e]}
+			nAssign++
+			i = e - 1
+		}
+		out := dst[:0]
+		changed := false
+		for i := 0; i < len(in); {
+			if in[i] != '$' {
+				out = append(out, in[i])
+				i++
+				continue
+			}
+			changed = true
+			j := i + 1
+			braced := false
+			if j < len(in) && in[j] == '{' {
+				braced = true
+				j++
+			}
+			// `$@` / `$*`：shell 里展开成位置参数，通常为空
+			if !braced && j < len(in) && (in[j] == '@' || in[j] == '*') {
+				i = j + 1
+				continue
+			}
+			s := j
+			for j < len(in) && isNameChar(in[j]) {
+				j++
+			}
+			name := in[s:j]
+			if braced {
+				if j < len(in) && in[j] == '}' {
+					j++
+				} else {
+					out = append(out, in[i])
+					i++
+					continue
+				}
+			}
+			if len(name) == 0 {
+				out = append(out, in[i]) // 单独的 `$`，原样保留
+				i++
+				continue
+			}
+			replaced := false
+			for k := 0; k < nAssign; k++ {
+				if bytes.Equal(assigns[k].name, name) {
+					out = append(out, assigns[k].val...)
+					replaced = true
+					break
+				}
+			}
+			if !replaced {
+				// 未赋值：shell 展开成空，这里也去掉（`i$@d` 这类拼装的要害）
+			}
+			i = j
+		}
+		if !changed {
+			return in, nil
+		}
+		return out, nil
+	})
+
 	// removeShellEscapes 去掉反斜杠转义：shell 会把 `\x` 解释成 `x`，
 	// 于是 `i\d` 执行的是 `id`、`c\at` 执行的是 `cat`。
 	// 检测侧如果只在原样字符串上匹配命令名，这类写法整条穿过。
@@ -870,4 +968,22 @@ func normalizePath(dst, in []byte, win bool) []byte {
 		res = append([]byte{'/'}, res...)
 	}
 	return res
+}
+
+// isNameStart / isNameChar 判定 shell 变量名（只认 ASCII 字母与下划线开头）。
+func isNameStart(c byte) bool {
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func isNameChar(c byte) bool {
+	return isNameStart(c) || (c >= '0' && c <= '9')
+}
+
+// isShellDelim 是赋值取值时的边界：空白与 shell 分隔符。
+func isShellDelim(c byte) bool {
+	switch c {
+	case ' ', '\t', '\n', '\r', ';', '&', '|', '+':
+		return true
+	}
+	return false
 }
