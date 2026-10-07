@@ -24,7 +24,7 @@ import {
   fmtBool,
 } from '../dom.js';
 import { notify, toastError, showWarnings } from '../components/toast.js';
-import { confirmDialog } from '../components/modal.js';
+import { confirmDialog, alertDialog } from '../components/modal.js';
 
 // 预览用的样例请求：只是拿来渲染模板，不代表真实流量。
 const SAMPLE = {
@@ -117,11 +117,34 @@ export function render(container) {
       );
       vm.preview = String(pick(res, ['html', 'body', 'content'], '') || '');
       showWarnings(warningsOf(res));
+      vm.busy = false;
+      paint();
+      // 结果同时弹出来：页面很长，只更新最下面那张卡等于"点了没反应"。
+      await alertDialog({
+        title: '预览：样例请求的渲染结果',
+        description:
+          '样例请求 ' + SAMPLE.method + ' ' + SAMPLE.host + SAMPLE.path +
+          '（类目 ' + SAMPLE.category + '）。预览只渲染，不改任何状态。',
+        body: renderCode(vm.preview, { label: '渲染结果', meta: '服务端 html/template 输出' }),
+        okText: '关闭',
+      });
     } catch (err) {
       vm.previewError = err;
+      vm.busy = false;
+      paint();
+      const detail = pick(err && err.body ? err.body : {}, ['error.detail', 'detail'], '') || '';
+      await alertDialog({
+        title: '模板没通过渲染',
+        description: '服务端编译或试渲染失败，当前模板未被改动。',
+        body: el(
+          'div',
+          {},
+          el('div', { text: String((err && err.message) || err) }),
+          detail ? el('div', { class: 'mono sm', text: String(detail) }) : null
+        ),
+        okText: '关闭',
+      });
     }
-    vm.busy = false;
-    paint();
   }
 
   async function doSave() {
