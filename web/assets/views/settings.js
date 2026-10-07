@@ -1,7 +1,6 @@
 // web/assets/views/settings.js
-// 职责：系统设置页 —— 门槛（Basic 遮挡层）、认证（口令/TOTP/api_token）、通知、日志与配置、备份、版本信息。
-// 取数：GET /gate、POST /gate/rotate、POST /gate/path/rotate、POST /gate/cert/selfsigned、
-//       POST /password、POST /totp/enroll、GET/PUT /notify、POST /notify/test、
+// 职责：系统设置页 —— 认证（口令/TOTP/api_token）、通知、日志与配置、备份、版本信息。
+// 取数：POST /password、POST /totp/enroll、GET/PUT /notify、POST /notify/test、
 //       GET /config、PUT /config、GET /config/diff、POST /config/reload、GET /backup、POST /restore、
 //       GET /status、GET /session。
 // 约束：拿不到的字段一律显示 "—"；没有端点的能力（如 api_token 轮换）明确写成"后端未定义"，不做假按钮。
@@ -58,164 +57,6 @@ function yesNo(value, tones) {
 }
 
 /* ── 门槛 ───────────────────────────────────────────────────── */
-
-function gateSection(host) {
-  const resource = createResource(() => api.gate());
-  const body = el('div', { class: 'stack-2' });
-  host.appendChild(card({ title: 'HTTP Basic 门槛', hint: 'GET /gate', body: body }));
-
-  bindState(body, resource, {
-    loadingTitle: '读取门槛配置…',
-    onRetry: () => resource.load(),
-    empty: { title: '后端未返回门槛配置' },
-    render: (payload) => {
-      const blocks = [];
-      const enabled = pick(payload, ['enabled', 'gate.enabled', 'basic.enabled'], null);
-      const realm = pick(payload, ['realm', 'gate.realm', 'basic.realm'], null);
-      const user = pick(payload, ['username', 'user', 'gate.username', 'basic.username'], null);
-      const rotatedAt = pick(payload, ['rotated_at', 'last_rotate', 'gate.rotated_at'], null);
-      const pathTokenEnabled = pick(payload, ['path_token_enabled', 'gate.path_token_enabled', 'path_token.enabled'], null);
-      const pathToken = pick(payload, ['path_token', 'gate.path_token'], null);
-      const failed = pick(payload, ['gate_failures', 'failed_attempts', 'stats.failures'], null);
-      const locked = asArray(pick(payload, ['locked_ips', 'banned', 'gate_locked'], []));
-      const cert = pick(payload, ['cert', 'certificate', 'tls'], null);
-
-      blocks.push(
-        kvList(
-          [
-            { k: '门槛开关', v: yesNo(enabled) },
-            { k: 'realm', v: realm === null ? null : el('span', { class: 'mono', text: String(realm) }) },
-            { k: '门槛用户名', v: user === null ? null : el('span', { class: 'mono', text: String(user) }) },
-            { k: '凭据轮换时间', v: rotatedAt ? fmtTime(rotatedAt) : null },
-            { k: '随机路径遮挡', v: pathTokenEnabled === null ? null : yesNo(pathTokenEnabled, { yes: 'info', no: 'neutral' }) },
-            {
-              k: '当前路径',
-              v: pathToken ? renderCode(pick(payload, ['url', 'path'], pathToken), { label: '控制台路径', tight: true }) : null,
-            },
-            { k: '门槛失败次数', v: failed === null ? null : fmtInt(failed) },
-            {
-              k: '被封禁 IP',
-              v:
-                locked.length === 0
-                  ? null
-                  : el(
-                      'div',
-                      { class: 'stack-1' },
-                      locked.slice(0, 20).map((item) =>
-                        el('div', { class: 'mono sm', text: coerceText(pick(item, ['ip', 'addr'], item)) })
-                      )
-                    ),
-            },
-            { k: '门槛凭据', v: el('span', { class: 'faint', text: '后端不返回明文；轮换即旧凭据立即失效' }) },
-          ].filter((row) => row.v !== null)
-        )
-      );
-
-      if (cert && typeof cert === 'object') {
-        blocks.push(
-          el(
-            'div',
-            { class: 'stack-2' },
-            sectionTitle('TLS 证书'),
-            kvList([
-              { k: '来源', v: coerceText(pick(cert, ['source', 'kind', 'type'], '—')) },
-              { k: '自签', v: yesNo(pick(cert, ['self_signed', 'selfsigned'], null)) },
-              { k: '指纹', v: pick(cert, ['fingerprint', 'sha256'], null) === null ? null : el('span', { class: 'mono wrap-anywhere', text: String(pick(cert, ['fingerprint', 'sha256'])) }) },
-              { k: '到期', v: pick(cert, ['not_after', 'expires_at'], null) === null ? null : fmtTime(pick(cert, ['not_after', 'expires_at'])) },
-              { k: 'SAN', v: asArray(pick(cert, ['san', 'dns_names'], [])).join(', ') || null },
-            ])
-          )
-        );
-      }
-
-      blocks.push(
-        el(
-          'div',
-          { class: 'row row--wrap' },
-          button('轮换门槛凭据', { tone: 'danger', size: 'sm', onClick: () => rotateGate(resource) }),
-          button('重新生成随机路径', { size: 'sm', onClick: () => rotatePath(resource) }),
-          button('重新生成自签证书', { size: 'sm', onClick: () => regenerateCert(resource) })
-        )
-      );
-
-      blocks.push(
-        el('div', {
-          class: 'xs faint',
-          text:
-            '门槛只是"不让扫描器看见门"，不是认证边界；登录会话才是。门槛凭据与登录账号必须分开保管。',
-        })
-      );
-      return blocks;
-    },
-  });
-  resource.load();
-
-  async function rotateGate(res) {
-    await openDialog({
-      title: '轮换门槛凭据',
-      description: 'POST /gate/rotate：旧凭据提交后立即失效，已经打开登录页的浏览器下一次请求就会 401。',
-      fields: [
-        { name: 'username', label: '新门槛用户名（留空则由后端生成）' },
-        { name: 'password', label: '新门槛口令', type: 'password', required: true },
-        { name: 'confirm', label: '再输一次', type: 'password', required: true },
-      ],
-      submitText: '轮换',
-      danger: true,
-      onSubmit: async (values) => {
-        if (values.password !== values.confirm) throw new Error('两次输入的口令不一致');
-        const body = { password: values.password };
-        if (values.username) body.username = values.username;
-        const result = await api.rotateGate(body);
-        showWarnings(warningsOf(result));
-        notify.ok('门槛凭据已轮换，旧凭据立即失效');
-        await res.load();
-      },
-    });
-  }
-
-  async function rotatePath(res) {
-    const ok = await confirmDialog({
-      title: '重新生成随机路径',
-      description: 'POST /gate/path/rotate：旧链接立即失效，需要重新分发新地址给运维同事。',
-      confirmText: '重新生成',
-    });
-    if (!ok) return;
-    try {
-      const result = await api.rotateGatePath();
-      showWarnings(warningsOf(result));
-      await alertDialog({
-        title: '新的控制台路径',
-        description: '请复制并安全地分发给运维同事；这一步之后旧地址不再可用。',
-        body: renderCode(pick(result, ['path', 'url', 'path_token'], result), { label: '新路径' }),
-      });
-      await res.load();
-    } catch (err) {
-      toastError(err, '重新生成失败');
-    }
-  }
-
-  async function regenerateCert(res) {
-    const ok = await confirmDialog({
-      title: '重新生成自签证书',
-      description: 'POST /gate/cert/selfsigned：新证书生效后浏览器会再次提示"不安全"，需要重新确认一次。',
-      confirmText: '重新生成',
-      danger: false,
-    });
-    if (!ok) return;
-    try {
-      const result = await api.regenerateCert();
-      showWarnings(warningsOf(result));
-      await alertDialog({
-        title: '新证书已生成',
-        description: '核对下面的指纹（与浏览器里看到的应当一致）。',
-        body: renderCode(pick(result, ['fingerprint', 'sha256', 'cert'], result), { label: '证书指纹' }),
-      });
-      await res.load();
-    } catch (err) {
-      toastError(err, '重新生成失败');
-    }
-  }
-}
 
 /* ── 认证 ───────────────────────────────────────────────────── */
 
@@ -883,7 +724,6 @@ function aboutSection(host) {
 /* ── 页面 ───────────────────────────────────────────────────── */
 
 const TAB_ITEMS = [
-  { key: 'gate', label: '门槛' },
   { key: 'auth', label: '认证' },
   { key: 'notify', label: '通知' },
   { key: 'config', label: '日志与配置' },
@@ -903,7 +743,7 @@ export function render(container) {
 
   const tabsHost = el('div');
   const host = el('div');
-  let active = 'gate';
+  let active = 'auth';
 
   function renderTabs() {
     tabsHost.replaceChildren(
@@ -918,8 +758,7 @@ export function render(container) {
     active = key;
     renderTabs();
     host.replaceChildren();
-    if (key === 'gate') gateSection(host);
-    else if (key === 'auth') authSection(host);
+    if (key === 'auth') authSection(host);
     else if (key === 'notify') notifySection(host);
     else if (key === 'config') {
       // 运行模式（引擎热参数）是这张标签页里最要紧的入口：应急切 detect → block。
@@ -933,7 +772,7 @@ export function render(container) {
   page.appendChild(el('div', { class: 'card' }, tabsHost));
   page.appendChild(host);
   renderTabs();
-  select('gate');
+  select('auth');
 
   return () => {};
 }

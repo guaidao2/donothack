@@ -148,7 +148,8 @@ journalctl -u donothack -f
 | `log.access_mode` | `all` | 切到 `block` 之后建议改成 `hit`（只记非 pass），否则高 QPS 下日志会吃满磁盘 |
 | `log.min_free_mb` | `1024` | 磁盘剩余低于它就**丢弃日志**并计数 —— 它优先于日志完整性 |
 | `admin.password_hash` | `""` | 用 `donothack hash-password` 生成。留空则每次启动随机生成一个并打印 |
-| `admin.gate.*` | 启用 | 第一层 Basic 门槛，见 4.3 |
+| `admin.allow_ips` | `[]` | 控制台的来源白名单。**留空 = 不限制**；填了就是硬边界，CLI 所在机器也要写进来 |
+| `admin.max_login_fails` | `5` | 登录失败次数上限，超过就封该来源（`admin.lockout`，默认 15 分钟） |
 | `alert.webhook` | `""` | 告警通道；默认禁止指向内网地址（防 SSRF），内网网关需 `alert.allow_private_hosts: true` |
 
 ### 4.2 三种运行模式
@@ -170,30 +171,121 @@ journalctl -u donothack -f
  配置校验会强制两件事：`mixed` 必须配 `category_thresholds`（否则它和 `block` 完全一样），
  非 `mixed` 模式不许配（否则你以为生效了）。
 
-### 4.3 控制台的两层准入
+### 4.3 控制台准入
 
 控制台默认 `admin.addr: 127.0.0.1:9443` + `admin.tls.enabled: true` + 自签证书。
 
-- **第一层 HTTP Basic 门槛**：挡扫描器，**不是认证边界**。未过门槛时该端口上
- **所有路径统一 401**（不区分是否存在），响应不带 `Server` 头、realm 用中性串 ——
- 401 与 404 的差异本身就是指纹。门槛凭据与登录账号**分开**，可单独轮换、可交给运维同事。
-- **第二层表单登录 + 会话**才是认证。建议登录后立刻开启 TOTP。
-- **别把两层的用户名搞混**：门槛的默认用户名是 `gate`，登录页的默认用户名是 `admin`。
-  `admin.password_hash` 与 `gate.password_hash` 都留空时，程序启动会生成一个初始口令，
-  并在日志里**并排打印两行**（一行给 Basic 框、一行给登录页），照用户名各填一次即可。
-  一旦你设了 `admin.password_hash`，`gate.password_hash` 就必须一起填 ——
-  否则启动直接报错，不会让门槛变成人人可过的摆设。
-- 写操作（含 TOTP 解绑）必须带 `X-Donothack-Console: 1` 头且 Origin 同源 ——
- 只靠 cookie 挡不住跨站表单。
+准入只有一层：**表单登录 + 会话**，用户名 `admin`、口令是 `admin.password_hash`
+（留空则每次启动生成一个随机口令并在日志里打印一次）。
+
+- 写操作（改口令、TOTP、规则启停、切模式、保存限速等）必须带 `X-Donothack-Console: 1`
+  头 + CSRF 令牌 + Origin 同源 —— 只靠 cookie 挡不住跨站表单。
 - 会话有 30 分钟闲置超时与 **12 小时绝对上限**（滑动不越过它）。
-- 门槛失败与登录失败各自按配置阈值封禁（默认 20 次 / 15 分钟、5 次 / 15 分钟）。
+- 登录失败按 `admin.max_login_fails`（默认 5 次 / 15 分钟窗口 → 封 15 分钟）封来源。
+- 想限制谁能连这个端口，用 `admin.allow_ips`（支持 CIDR）；它是网络边界，
+  对所有人一视同仁，**CLI 所在机器也要写进去**。
+
+> 早期版本在这个端口上还叠了一层 HTTP Basic「门槛」。它只是遮挡、不是认证边界，
+> 却让运维多记一套凭据、还要面对浏览器反复弹窗，现在已移除。老配置里如果还留着
+> `admin.gate:`，启动会直接告诉你把整段删掉。
 
 两种起法：
 
 - **只给本机用**（推荐）：保持 `127.0.0.1`，`ssh -L 9443:127.0.0.1:9443 you@vps`，
- 浏览器开 `https://127.0.0.1:9443/`，接受自签证书。
+  浏览器开 `https://127.0.0.1:9443/`，接受自签证书。
 - **要公开访问**：改 `admin.addr` 为 `0.0.0.0:9443`，**并且换掉自签证书**改配真证书、
- 设 `auto_self_signed: false`，防火墙只放你要的源 IP。
+  设 `auto_self_signed: false`，防火墙只放你要的源 IP。
+
+### 4.4 保护 Docker 应用映射出来的端口
+
+常见情形：应用跑在 Docker 里，用 `-p 8080:80` 把端口映射到宿主机对外服务，
+现在想在它前面加一道 WAF。**donothack 直接跑在宿主机上**（二进制 + systemd，见第 3 节），
+不参与容器编排。
+
+要做的只有两步，顺序不能反。
+
+**第一步：把应用的映射改成只绑回环。** 这一步是成败关键 —— 只要 `8080` 还挂在
+`0.0.0.0` 上，攻击者绕过 WAF 直连它就完事了，WAF 只是个摆设。
+
+```yaml
+# compose.yaml
+services:
+  web:
+    image: your-app:latest
+    ports:
+      - "127.0.0.1:8080:80"        # 只绑回环：外部访问不到，WAF 能访问
+```
+
+命令行起容器的写法等价：`docker run -p 127.0.0.1:8080:80 your-app`。
+
+**第二步：让 donothack 指向它，并对外监听 80。**
+
+```yaml
+listen:
+  addr: "0.0.0.0:80"               # WAF 是对外那一个
+
+upstream:
+  url: "http://127.0.0.1:8080"     # 指回宿主机的回环，就是那个容器
+  allowed_hosts: ["your-domain.com", "*.your-domain.com"]
+
+engine:
+  mode: detect                     # 先观察，确认误报后再切 block（控制台里可热切）
+
+log:
+  dir: "/var/log/donothack"
+  access_mode: all
+
+admin:
+  addr: "127.0.0.1:9443"           # 控制台只给本机，SSH 隧道访问
+  tls:
+    enabled: true
+    auto_self_signed: true
+```
+
+**验证（两条都要过）**：
+
+```bash
+# 1. 正常请求应当经由 WAF —— 响应里会有 X-Donothack-* 头，并被记进日志
+curl -sI -H 'Host: your-domain.com' http://<服务器公网IP>/ | head -20
+
+# 2. 直连应用端口必须连不上（这一步证明绕不过去）
+curl -sI --max-time 3 http://<服务器公网IP>:8080/    # 期望：连接被拒
+```
+
+如果第二条还能通，说明容器还在对外映射，回第一步。
+
+几条容易踩的：
+
+- **Docker 的端口映射会绕过 ufw / firewalld 的 INPUT 规则**（它走 DNAT 链）。
+  所以"用防火墙挡住 8080"通常不管用；`-p 127.0.0.1:8080:80` 才是可靠做法。
+  真要按源 IP 收口，规则得写进 `DOCKER-USER` 链。
+- **donothack 是唯一入口时不需要配 `real_ip.trusted_proxies`** —— 它看到的就是
+  客户端真实 IP，限速与封禁按这个记。只有当它前面还有一层反代或 CDN
+  （Nginx、Traefik、Cloudflare）时才需要，见 4.1 与下一节。
+- **容器之间互相调用不受影响**：别的容器用服务名或容器 IP 访问应用，不经过宿主机映射。
+- **别把控制台端口 `-p` 出去**：`admin.addr` 保持 `127.0.0.1:9443`，远程用
+  `ssh -L 9443:127.0.0.1:9443 you@host`。
+- **应用自己也该改回 `network_mode: host` 吗？** 不需要。保持默认 bridge 网络 +
+  `127.0.0.1` 映射最简单；`network_mode: host` 会让容器直接占用宿主机端口，
+  反而更难和 WAF 分工。
+- **TLS 终结在 WAF 上**：证书配在 donothack（`listen.tls.*`），容器里的应用继续跑明文 HTTP，
+  少一份证书要维护。
+
+### 4.5 前面还有一层反代或 CDN
+
+donothack 前面挂着 Nginx、Traefik 或 Cloudflare 时，它看到的来源 IP 会变成那一层，
+限速、封禁、攻击事件里的来源都会失真。这时必须配：
+
+```yaml
+real_ip:
+  header: "X-Forwarded-For"        # Cloudflare 用 "CF-Connecting-IP"
+  trusted_proxies:                 # 只信这些来源发来的那个头
+    - "172.16.0.0/12"
+    - "127.0.0.1/32"
+```
+
+`trusted_proxies` 留空时 `X-Forwarded-For` 会被**完全忽略**（这是刻意的：随便信任这个头
+等于让攻击者自由伪造来源）。只填你确实控制的那几段 —— 填 `0.0.0.0/0` 就等于放弃来源判断。
 
 ## 5. 性能与容量
 
@@ -311,7 +403,7 @@ Windows 11 / 24 核 / 16 GiB，`medium` 档，32 并发 10 秒。
 ### 6.5 备份与恢复
 
 控制台"设置 → 备份"可导出配置、规则集、拦截页、IP 名单、例外。
-**备份不含任何凭据**（`password_hash` / `api_token` / 门槛凭据一律不导出）——
+**备份不含任何凭据**（`password_hash` / `api_token` / TOTP 密钥一律不导出）——
 备份文件经常被随手放在共享目录里，这是刻意的。
 
 建议把 `config.yaml` 与 `rules/` 一起纳入版本管理（都是纯文本），凭据单独保管。
@@ -350,13 +442,16 @@ Windows 11 / 24 核 / 16 GiB，`medium` 档，32 并发 10 秒。
 
 按层排查，每层是独立的：
 
-1. **门槛（Basic）**：忘了就删掉配置里的 `admin.gate.password_hash` 重启，会重新生成并打印。
-2. **登录口令**：用 `donothack hash-password` 生成新哈希写进 `admin.password_hash` 重启。
-  这是刻意的设计：不提供绕过登录的后门。
-3. **TOTP 丢失**：调 `POST /api/v1/totp/disable`（带 `username` + `password`、
-  `X-Donothack-Console: 1` 头与同源 Origin），或把 `admin.totp_enabled` 改成 `false` 重启。
-4. **IP 白名单**：`admin.allow_ips` 配了但不含你现在的 IP。
-5. **探测封禁**：门槛失败太多次被临时封了（默认 20 次 / 15 分钟）。
+1. **登录口令**：用 `donothack hash-password` 生成新哈希写进 `admin.password_hash` 重启。
+   这是刻意的设计：不提供绕过登录的后门。把那一行删掉重启会重新生成并打印一次。
+2. **TOTP 丢失**：调 `POST /api/v1/totp/disable`（带 `username` + `password`、
+   `X-Donothack-Console: 1` 头与同源 Origin），或把 `admin.totp_enabled` 改成 `false` 重启。
+3. **IP 白名单**：`admin.allow_ips` 配了但不含你现在的 IP —— 回 403，且响应不带产品特征。
+4. **登录封禁**：连续输错 `admin.max_login_fails` 次（默认 5）被临时封 15 分钟，
+   操作审计里能看到对应的失败记录。
+5. **启动就报错说 `admin.gate`**：那是早期版本的第一层 Basic 门槛，已移除 ——
+   把 `admin` 段落里的整个 `gate:` 块删掉再启动。
+
 
 ### 规则改了没生效
 

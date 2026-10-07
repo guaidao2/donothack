@@ -355,21 +355,6 @@ type LogConfig struct {
 	CapturePayload bool `yaml:"capture_payload"`
 }
 
-// GateConfig 是控制台第一层门槛（防扫描器，不是认证边界）。
-type GateConfig struct {
-	Enabled           bool     `yaml:"enabled"`
-	Mode              string   `yaml:"mode"` // basic | none
-	Realm             string   `yaml:"realm"`
-	Username          string   `yaml:"username"`
-	PasswordHash      string   `yaml:"password_hash"`
-	PathToken         string   `yaml:"path_token"`
-	ExemptAPIToken    bool     `yaml:"exempt_api_token"`
-	ProbeBanWindow    Duration `yaml:"probe_ban_window"`
-	ProbeBanAfter     int      `yaml:"probe_ban_after"`
-	ProbeBanDuration  Duration `yaml:"probe_ban_duration"`
-	AutoSelfSignedTLS bool     `yaml:"auto_self_signed"`
-}
-
 // ConsoleTLSConfig 是控制台监听自身的 TLS。
 type ConsoleTLSConfig struct {
 	Enabled        bool   `yaml:"enabled"`
@@ -392,7 +377,6 @@ type EventsConfig struct {
 type AdminConfig struct {
 	Enabled bool             `yaml:"enabled"`
 	Addr    string           `yaml:"addr"`
-	Gate    GateConfig       `yaml:"gate"`
 	TLS     ConsoleTLSConfig `yaml:"tls"`
 	// AuthMode 目前只实现了 `session`。
 	//
@@ -516,19 +500,10 @@ func Default() *Config {
 			AccessSampleRatio: 100,
 		},
 		Admin: AdminConfig{
-			Enabled:  true,
-			Addr:     "127.0.0.1:9443",
-			AuthMode: "session",
-			Username: "admin",
-			Gate: GateConfig{
-				Enabled:          true,
-				Mode:             "basic",
-				Realm:            "Restricted",
-				Username:         "gate",
-				ProbeBanWindow:   Duration(60 * time.Second),
-				ProbeBanAfter:    20,
-				ProbeBanDuration: Duration(15 * time.Minute),
-			},
+			Enabled:            true,
+			Addr:               "127.0.0.1:9443",
+			AuthMode:           "session",
+			Username:           "admin",
 			TLS:                ConsoleTLSConfig{Enabled: true, AutoSelfSigned: true},
 			SessionIdleTimeout: Duration(30 * time.Minute),
 			MaxLoginFails:      5,
@@ -573,6 +548,26 @@ func (c *Config) ApplyProfile(p profile.Params) {
 	}
 }
 
+// removedFieldHint 把"已移除的配置段"翻译成一句能照做的提示。
+//
+// 为什么值得单独写：严格解码（KnownFields）遇到旧配置只会回
+// `field gate not found in type config.AdminConfig` —— 运维看不懂，
+// 而他要做的动作其实很简单：把 admin.gate 整段删掉。
+func removedFieldHint(raw []byte) string {
+	var probe struct {
+		Admin map[string]any `yaml:"admin"`
+	}
+	if err := yaml.Unmarshal(raw, &probe); err != nil {
+		return ""
+	}
+	if _, ok := probe.Admin["gate"]; !ok {
+		return ""
+	}
+	return "admin.gate（HTTP Basic 门槛）已移除：认证只由表单登录 + 会话承担。\n" +
+		"  请把 admin 段落里的整个 gate: 块删掉（连同它下面缩进的所有行），然后重启。\n" +
+		"  想限制来源请用 admin.allow_ips；想细分登录爆破阈值用 admin.max_login_fails / admin.lockout。"
+}
+
 // Load 读取并校验配置文件。默认值先铺好，YAML 里出现的字段覆盖之；
 // 档位相关的上限在档位解析完成后再填充。
 func Load(path string) (*Config, error) {
@@ -586,6 +581,10 @@ func Load(path string) (*Config, error) {
 	if err := dec.Decode(cfg); err != nil {
 		if errors.Is(err, io.EOF) {
 			return nil, fmt.Errorf("配置文件 %s 是空的", path)
+		}
+		// 老配置里残留的门槛字段给一句人话，别丢原始 yaml 报错给运维。
+		if removed := removedFieldHint(raw); removed != "" {
+			return nil, fmt.Errorf("解析 %s 失败：%s", path, removed)
 		}
 		return nil, fmt.Errorf("解析 %s 失败：%w", path, err)
 	}
@@ -694,22 +693,6 @@ func (c *Config) validateAdmin() error {
 	if a.MaxLoginFails < 0 {
 		return fmt.Errorf("admin.max_login_fails 不能为负（0 表示用默认值 5），实际 %d", a.MaxLoginFails)
 	}
-	if a.Gate.Enabled {
-		if a.Gate.ProbeBanAfter < 0 {
-			return fmt.Errorf("admin.gate.probe_ban_after 不能为负（0 表示用默认值 20）")
-		}
-		if a.Gate.ProbeBanWindow < 0 || a.Gate.ProbeBanDuration < 0 {
-			return fmt.Errorf("admin.gate.probe_ban_window / probe_ban_duration 不能为负")
-		}
-		if a.Gate.Mode != "" && a.Gate.Mode != "basic" && a.Gate.Mode != "none" {
-			return fmt.Errorf("admin.gate.mode 只支持 basic 或 none，实际 %q", a.Gate.Mode)
-		}
-		if strings.TrimSpace(a.Gate.PathToken) != "" {
-			if sanitized := sanitizeToken(a.Gate.PathToken); sanitized == "" {
-				return fmt.Errorf("admin.gate.path_token 过滤后为空：只允许字母、数字、- 和 _")
-			}
-		}
-	}
 
 	// TOTP 开关与密钥必须成对：只开开关不给密钥的话，每个实例重启后都会
 	// 拿着一把自己生成的密钥，运维认证器里那把立刻变成废码。
@@ -718,21 +701,6 @@ func (c *Config) validateAdmin() error {
 			"服务端不会替你生成（生成一次你就再也对不上了）")
 	}
 	return nil
-}
-
-// sanitizeToken 收敛路径 token 的字符集（与 console.sanitizePathToken 同一套规则）。
-//
-// 放在 config 里是为了**在加载期就能拦住**，而不是等控制台构造时才发现
-// 。
-func sanitizeToken(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
 }
 
 func (c *Config) validateListen() error {

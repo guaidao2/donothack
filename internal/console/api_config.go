@@ -58,7 +58,6 @@ var restartFieldPrefixes = []string{
 	"metrics.",
 	"admin.addr",
 	"admin.tls.",
-	"admin.gate.",
 	"profile",
 }
 
@@ -292,12 +291,6 @@ func scrubSecrets(m map[string]any) {
 		// 原先漏了这一个）。
 		if v, exists := admin["totp_secret"]; exists {
 			admin["totp_secret"] = secretFingerprint(toString(v))
-		}
-		if gate, ok := admin["gate"].(map[string]any); ok {
-			delete(gate, "password_hash")
-			if v, exists := gate["path_token"]; exists {
-				gate["path_token"] = secretFingerprint(toString(v))
-			}
 		}
 	}
 	// 告警 webhook 的 URL 里常带机器人 token。

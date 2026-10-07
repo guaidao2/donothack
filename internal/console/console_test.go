@@ -18,11 +18,6 @@ func testConfig() *config.Config {
 	c.Admin.Username = "admin"
 	c.Admin.PasswordHash = mustHash("LoginPw-2026")
 	c.Admin.AllowInsecure = true
-	c.Admin.Gate.Enabled = true
-	c.Admin.Gate.Mode = "basic"
-	c.Admin.Gate.Realm = "Restricted"
-	c.Admin.Gate.Username = "gatekeeper"
-	c.Admin.Gate.PasswordHash = mustHash("GatePw-2026")
 	return c
 }
 
@@ -120,11 +115,13 @@ func TestCheckOrigin(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------- 门槛
+// ---------------------------------------------------------------- 准入
 
-// 门槛最要紧的判据：**所有路径统一 401，不区分是否存在**。
-// 用 404 区分会立刻把控制台从一堆端口里暴露出来。
-func TestGateReturns401OnEveryPath(t *testing.T) {
+// 控制台不再有 HTTP Basic 门槛。这条测试守两件事：
+//  1. 任何响应都**不带 WWW-Authenticate** —— 带了浏览器就会弹凭据框，
+//     这正是移除它的原因（运维反馈"填完还弹、怎么填都不对"）；
+//  2. 认证边界仍然在 API 层：未登录一律 401 unauthenticated。
+func TestNoBasicChallengeAnywhere(t *testing.T) {
 	s := newTestConsole(t)
 	h := s.Handler()
 
@@ -136,48 +133,46 @@ func TestGateReturns401OnEveryPath(t *testing.T) {
 	for _, p := range paths {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, httptest.NewRequest("GET", p, nil))
-		if w.Code != http.StatusUnauthorized {
-			t.Errorf("路径 %q 应返回 401，实际 %d", p, w.Code)
+		if wa := w.Header().Get("WWW-Authenticate"); wa != "" {
+			t.Errorf("路径 %q 返回了 WWW-Authenticate: %q —— 浏览器会因此弹 Basic 框", p, wa)
 		}
 		// 不能带产品指纹
 		if got := w.Header().Get("Server"); got != "" {
 			t.Errorf("路径 %q 的响应带了 Server 头：%q", p, got)
 		}
-		wa := w.Header().Get("WWW-Authenticate")
-		if !strings.Contains(wa, `Basic realm="Restricted"`) {
-			t.Errorf("路径 %q 的 realm 不对：%q", p, wa)
-		}
-		if strings.Contains(strings.ToLower(w.Body.String()), "donothack") &&
-			!strings.Contains(w.Body.String(), "401") {
-			t.Errorf("路径 %q 的 401 响应体泄露了产品名", p)
-		}
 	}
 }
 
-func TestGateAcceptsCorrectBasic(t *testing.T) {
+// API 的认证边界不变：没有会话就是 401 unauthenticated。
+func TestAPIStillRequiresSession(t *testing.T) {
 	s := newTestConsole(t)
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/api/v1/status", nil)
-	r.SetBasicAuth("gatekeeper", "GatePw-2026")
-	s.Handler().ServeHTTP(w, r)
-	// 过了门槛但没登录 → API 层 401（不是门槛的 401）
+	s.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/api/v1/status", nil))
 	if w.Code != http.StatusUnauthorized {
-		t.Errorf("过门槛未登录应当被 API 拒绝，实际 %d", w.Code)
+		t.Fatalf("未登录调 API 应当 401，实际 %d", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "unauthenticated") &&
-		!strings.Contains(w.Body.String(), "需要先登录") {
-		t.Errorf("应当是 API 层的未登录错误，实际 %s", w.Body.String())
+	if !strings.Contains(w.Body.String(), "unauthenticated") {
+		t.Errorf("错误码应当是 API 层的 unauthenticated，实际 %s", w.Body.String())
 	}
 }
 
-func TestGateRejectsWrongBasic(t *testing.T) {
-	s := newTestConsole(t)
+// allow_ips 是现在（唯一）的准入层，必须真的生效，且响应不泄露产品名。
+func TestAllowIPsStillEnforced(t *testing.T) {
+	cfg := testConfig()
+	cfg.Admin.AllowIPs = []string{"10.9.9.9"}
+	ctl := control.New(control.Options{Initial: &control.State{Version: "v1", DisabledRules: map[string]bool{}}})
+	s, _, err := New(Options{Config: cfg, Control: ctl, Version: "test"})
+	if err != nil {
+		t.Fatalf("构造控制台失败：%v", err)
+	}
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/", nil)
-	r.SetBasicAuth("gatekeeper", "错的")
-	s.Handler().ServeHTTP(w, r)
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("门槛凭据错应当 401，实际 %d", w.Code)
+	// httptest 的默认来源是 192.0.2.1，不在允许列表里
+	s.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("来源不在 allow_ips 内应当 403，实际 %d", w.Code)
+	}
+	if strings.Contains(strings.ToLower(w.Body.String()), "donothack") {
+		t.Errorf("403 响应体泄露了产品名：%s", w.Body.String())
 	}
 }
 
@@ -260,20 +255,20 @@ func TestClientIPAndAllowIPs(t *testing.T) {
 	}
 }
 
-func TestAPITokenSkipsGateButRequiresHeader(t *testing.T) {
+func TestAllowIPsAppliesEvenWithValidToken(t *testing.T) {
 	s := newTestConsole(t)
 	s.o.Config.Admin.APIToken = "secret-token-123456"
-	// token 免除门槛**必须显式开启**（-04：
-	// 原先这个开关没人读，等于永远免门槛、免白名单、免限速）。
-	s.o.Config.Admin.Gate.ExemptAPIToken = true
+	s.o.Config.Admin.AllowIPs = []string{"10.9.9.9"}
 
-	// 带 token 不需要门槛 Basic
+	// allow_ips 是**网络边界**：来源不在列表里就是 403，即使 token 正确。
+	// （曾经 token 能顺带免掉白名单，而配置里那个开关写着"只免门槛"，
+	// 名不副实；现在只有一条规则：白名单对所有人一视同仁。）
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/api/v1/status", nil)
 	r.Header.Set(tokenHeader, "secret-token-123456")
 	s.Handler().ServeHTTP(w, r)
-	if w.Code == http.StatusUnauthorized {
-		t.Error("带合法 API token 不该被门槛拦住")
+	if w.Code != http.StatusForbidden {
+		t.Errorf("来源不在 allow_ips 内应当 403（与 token 无关），实际 %d", w.Code)
 	}
 
 	// 写操作：token 路径要求自定义头（没有浏览器上下文，不需要 CSRF）
@@ -287,32 +282,19 @@ func TestAPITokenSkipsGateButRequiresHeader(t *testing.T) {
 	if !s.requireWrite(httptest.NewRecorder(), r2) {
 		t.Error("带 token + 自定义头应当通过")
 	}
-
-	// 错 token 无效
-	r3 := httptest.NewRequest("GET", "/", nil)
-	r3.Header.Set(tokenHeader, "错的")
-	w3 := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w3, r3)
-	if w3.Code != http.StatusUnauthorized {
-		t.Errorf("错 token 应当被门槛拦，实际 %d", w3.Code)
-	}
 }
 
-// 关掉 `gate.exempt_api_token` 后，**即使 token 正确也必须过门槛**。
-//
-// 这是-04 的回归：token 原先是一条约不到的硬通道，
-// 而它同时免掉 IP 白名单、限速与探测封禁。
-func TestAPITokenExemptionCanBeDisabled(t *testing.T) {
+// 带 API token 仍然需要会话或 token 才能调 API（token 不是万能通行证）。
+func TestAPITokenStillNeedsValidToken(t *testing.T) {
 	s := newTestConsole(t)
 	s.o.Config.Admin.APIToken = "secret-token-123456"
-	s.o.Config.Admin.Gate.ExemptAPIToken = false // 显式关闭
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/api/v1/status", nil)
-	r.Header.Set(tokenHeader, "secret-token-123456")
+	r.Header.Set(tokenHeader, "错的-token")
 	s.Handler().ServeHTTP(w, r)
 	if w.Code != http.StatusUnauthorized {
-		t.Errorf("关掉豁免后，带 token 也必须过门槛（401），实际 %d", w.Code)
+		t.Errorf("token 不对应当被 API 层拒（401），实际 %d", w.Code)
 	}
 }
 

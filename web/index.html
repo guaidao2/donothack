@@ -5,11 +5,10 @@
     · 没有内联脚本，没有 style 属性，没有内联样式表 —— CSP 不需要 unsafe-inline 与 nonce；
     · <base href> 是"资源与路由相对谁"的唯一开关：它让 /events/<id> 这类深链接下的相对资源
       （assets/*.js|css）仍然指回控制台根，而不是 /events/assets/*；
-    · 因为路由用的是 History API，深链接必须由 Go 侧回落到本文件（§6"门槛路径前缀下全部回落到 index.html"）；
-    · 【Go 侧要求】控制台若不挂在根路径（例如启用 gate.path_token 变成 /c/<token>/），
-      必须在把本文件写回响应时把下面的 <base href="/"> 改写成该前缀（即 /c/<token>/），
-      并把 <meta name="dh-base"> 改成同一个值；这与 §6 里给资源 URL 补 ?v=<build> 是同一处改写。
-      不改写也能用（根路径部署），但深链接会取不到 assets。
+    · 因为路由用的是 History API，深链接必须由 Go 侧回落到本文件；
+    · 【Go 侧要求】控制台固定挂在根路径：把本文件写回响应时把 <base href="/"> 与
+      <meta name="dh-base"> 保持成同一个值即可；给资源 URL 补 ?v=<build> 也在同一处做。
+      深链接必须能取到 assets，否则直接打开 /events/<id> 会是白屏。
     · <meta name="dh-version"> 由 Go 侧用 ldflags 注入的构建版本填充，前端只读不改。
 -->
 <html lang="zh-CN">

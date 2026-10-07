@@ -290,10 +290,11 @@ func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 	// 而在此之前产品里没有任何方式能拿到这个哈希 —— 提示语让人去持久化一个
 	// 他根本拿不到的值，等于把运维带进死路。
 	// 回显本身不扩大攻击面：调用方刚刚证明了自己知道旧口令，且已登录。
-	writeJSON(w, http.StatusOK, okResponse{OK: true, Warnings: []string{
+	warnings := []string{
 		fmt.Sprintf("密码已更新，已注销 %d 个会话（包括当前会话），请重新登录", n),
 		"下面这行哈希请写进 admin.password_hash —— 否则重启后会回到配置文件里的旧值",
-	}, PasswordHash: hash})
+	}
+	writeJSON(w, http.StatusOK, okResponse{OK: true, Warnings: warnings, PasswordHash: hash})
 }
 
 // ---------------------------------------------------------------- 状态与统计
@@ -310,7 +311,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"version":  s.o.Version,
 		"now":      nowISO(),
 		"snapshot": s.snapshotVersion(),
-		"mount":    s.mount,
 		"num_cpu":  runtime.NumCPU(),
 		// GOMAXPROCS 与 NumCPU 不一定相等（可能被环境变量限制），要如实报。
 		"gomaxprocs":     runtime.GOMAXPROCS(0),
@@ -435,7 +435,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"sessions":     s.session.count(),
 		"logins":       s.logins.Load(),
 		"login_fails":  s.loginFails.Load(),
-		"gate_fails":   s.gateFails.Load(),
 		"csrf_rejects": s.csrfFails.Load(),
 		"blocked":      s.blockedReqs.Load(),
 	}
@@ -548,7 +547,7 @@ func (s *Server) handleEventByID(w http.ResponseWriter, r *http.Request) {
 	if !s.requireRead(w, r) {
 		return
 	}
-	rest := strings.TrimPrefix(r.URL.Path, s.mount+"/api/v1/events/")
+	rest := strings.TrimPrefix(r.URL.Path, "/api/v1/events/")
 	rest = strings.Trim(rest, "/")
 	if rest == "" || s.o.Events == nil {
 		s.writeError(w, http.StatusNotFound, "not_found", "事件不存在", "")
@@ -683,7 +682,7 @@ func (s *Server) handleRules(w http.ResponseWriter, r *http.Request) {
 
 // handleRuleByID 支持 GET 详情与 PATCH 启停。
 func (s *Server) handleRuleByID(w http.ResponseWriter, r *http.Request) {
-	id := strings.Trim(strings.TrimPrefix(r.URL.Path, s.mount+"/api/v1/rules/"), "/")
+	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/rules/"), "/")
 	if id == "" {
 		s.writeError(w, http.StatusNotFound, "not_found", "缺少规则 ID", "")
 		return
@@ -1127,7 +1126,7 @@ func (s *Server) handleBanByIP(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWrite(w, r) {
 		return
 	}
-	ip := strings.Trim(strings.TrimPrefix(r.URL.Path, s.mount+"/api/v1/bans/"), "/")
+	ip := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/bans/"), "/")
 	if ip == "" {
 		s.writeError(w, http.StatusBadRequest, "bad_request", "缺少 IP", "")
 		return
@@ -1147,7 +1146,7 @@ func (s *Server) handleBanByIP(w http.ResponseWriter, r *http.Request) {
 
 // handleConfig 返回当前配置（**脱敏**）。
 //
-// 绝不返回 password_hash / api_token / gate.password_hash ——
+// 绝不返回 password_hash / api_token ——
 // 控制台读接口可能被低权限查看，凭据哈希也不该出现在浏览器里。
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	// PUT 直接拒绝并指路：通用配置写入会静默忽略"改不了"的字段，
@@ -1187,8 +1186,6 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		},
 		"admin": map[string]any{
 			"enabled": s.o.Config.Admin.Enabled, "addr": s.o.Config.Admin.Addr,
-			"gate_enabled":  s.o.Config.Admin.Gate.Enabled,
-			"gate_mode":     s.o.Config.Admin.Gate.Mode,
 			"auth_mode":     s.o.Config.Admin.AuthMode,
 			"username":      s.o.Config.Admin.Username,
 			"tls_enabled":   s.o.Config.Admin.TLS.Enabled,
@@ -1267,12 +1264,11 @@ func (s *Server) handleConsoleAudit(w http.ResponseWriter, r *http.Request) {
 
 // ---------------------------------------------------------------- 内部工具
 
-func (s *Server) cookiePath() string {
-	if s.mount != "" {
-		return s.mount
-	}
-	return "/"
-}
+// cookiePath 返回会话 cookie 的 Path。
+//
+// 控制台不再有"随机挂载路径"（那是已移除的 Basic 门槛的附属功能），
+// 所以固定是根路径。
+func (s *Server) cookiePath() string { return "/" }
 
 func (s *Server) snapshotVersion() string {
 	if snap := s.o.Control.Snapshot(); snap != nil {

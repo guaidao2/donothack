@@ -11,22 +11,21 @@ import (
 	"time"
 )
 
-// gateState 持有可轮换的门槛凭据。
+// hashState 持有一份可轮换的口令哈希（登录口令、TOTP 密钥都用它）。
 //
-// 单独包一层（而不是直接读配置）是因为门槛凭据要能**在不重启的情况下轮换** ——
-// 它可能被交给运维同事，泄露了要能马上换掉。
-type gateState struct {
+// 单独包一层（而不是直接读配置）是因为这些值要能**在不重启的情况下轮换**。
+type hashState struct {
 	mu           sync.RWMutex
 	passwordHash string
 }
 
-func (g *gateState) set(hash string) {
+func (g *hashState) set(hash string) {
 	g.mu.Lock()
 	g.passwordHash = hash
 	g.mu.Unlock()
 }
 
-func (g *gateState) get() string {
+func (g *hashState) get() string {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	return g.passwordHash

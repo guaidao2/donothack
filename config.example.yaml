@@ -129,29 +129,15 @@ admin:
   enabled: true
   addr: "127.0.0.1:9443"         # 公网暴露时改成 0.0.0.0:9443 并确保防火墙只放你要的口
 
-  # 第一层：HTTP Basic 门槛 —— 挡扫描器，**不是认证边界**
-  # 未过 Basic 时，本端口上所有路径统一 401，不区分路径是否存在
+  # 准入：只有一层 —— 表单登录 + 会话（下面的 username / password_hash）。
+  # 曾经还有一层 HTTP Basic「门槛」，已移除：它只是遮挡、不是认证边界，
+  # 却让运维多记一套凭据、还要面对浏览器反复弹窗。
   #
-  # 注意用户名：门槛的默认用户名是 gate，**不是**下面的 admin。
-  # 浏览器弹的那个 Basic 框要填 gate；进了页面之后的登录框才填 admin。
-  gate:
-    enabled: true
-    mode: basic                  # basic | none
-    realm: "Restricted"          # 中性字符串，别写产品名（那等于自报家门）
-    username: gate
-    password_hash: ""            # 与登录账号分开，可各自轮换。
-                                 # 留空且 admin.password_hash 也留空时：门槛沿用
-                                 # 启动时生成的那个初始口令（日志里两行并排打印）。
-                                 # 但若你设了 admin.password_hash，这一项就必须填 ——
-                                 # 否则启动直接报错（免得门槛变成人人可过的摆设）。
-                                 # 生成方式同下：donothack hash-password
-    path_token: ""               # 可选额外遮挡：控制台挂随机路径
-    exempt_api_token: true       # 带 X-Donothack-Token 的请求跳过门槛，方便 CLI
-    probe_ban_window: 60s
-    probe_ban_after: 20
-    probe_ban_duration: 15m
+  # 想限制来源就用 allow_ips（见下），它是网络边界，对所有人一视同仁。
+  #
+  # 登录表单会把口令明文发出去，所以非本机绑定必须配 TLS。
 
-  # 门槛用 Basic ⇒ TLS 强制。留空证书时首次启动自动生成自签证书并打印指纹。
+  # 留空证书时首次启动自动生成自签证书并打印指纹。
   tls:
     enabled: true
     cert_file: ""

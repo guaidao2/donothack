@@ -297,10 +297,6 @@ export const api = {
   setEngine: (body) => request('/engine', { method: 'PUT', body: body }),
 
   /* 门槛 */
-  gate: () => request('/gate'),
-  rotateGate: (body) => request('/gate/rotate', { method: 'POST', body: body || {} }),
-  rotateGatePath: () => request('/gate/path/rotate', { method: 'POST' }),
-  regenerateCert: () => request('/gate/cert/selfsigned', { method: 'POST' }),
 
   /* 状态与指标 */
   status: () => request('/status'),

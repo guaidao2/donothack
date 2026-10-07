@@ -36,8 +36,6 @@ import (
 
 const (
 	// 门槛的 Basic realm 默认值：中性，不暴露产品。
-	defaultRealm = "Restricted"
-	// 会话 cookie 名。
 	sessionCookie = "donothack_session"
 	// CSRF cookie 名（前端已按这个名字对接）。
 	csrfCookie = "donothack_csrf"
@@ -355,18 +353,4 @@ func isWriteMethod(m string) bool {
 		return true
 	}
 	return false
-}
-
-// basicAuthOK 校验门槛凭据。
-func basicAuthOK(r *http.Request, wantUser, wantHash string) bool {
-	user, pass, ok := r.BasicAuth()
-	if !ok {
-		return false
-	}
-	// 用户名也要常数时间比：否则能通过响应时间枚举用户名是否存在。
-	userOK := subtle.ConstantTimeCompare([]byte(user), []byte(wantUser)) == 1
-	// 注意：**无论用户名对不对都跑一次 PBKDF2**，避免"用户名错马上就返回"
-	// 造成的时间侧信道。这里用密码校验的结果与用户名校验结果相与。
-	passOK := verifyPassword(wantHash, pass)
-	return userOK && passOK
 }

@@ -82,7 +82,7 @@ function metaContent(name) {
 }
 
 /**
- * 控制台 base 前缀。优先取 <base href>（Go 侧改写它即可支持 gate.path_token 的随机前缀），
+ * 控制台 base 前缀。优先取 <base href>（控制台固定挂在根路径），
  * 没有 <base> 时退回 <meta name="dh-base">，都没有就是根路径。
  */
 function consoleBase() {
@@ -280,7 +280,7 @@ function renderLogin(notice) {
             'div',
             { class: 'card__body' },
             el('div', { class: 'gate__brand', text: '登录控制台' }),
-            el('div', { class: 'gate__desc', text: '表单登录 + 会话认证；HTTP Basic 门槛只是不让人看见门。' }),
+            el('div', { class: 'gate__desc', text: '表单登录 + 会话认证。' }),
             notice ? banner('warn', notice, null) : null,
             form
           )
@@ -317,7 +317,7 @@ function renderSessionError() {
           stateBlock({
             tone: 'error',
             title: '无法确认会话状态',
-            hint: '控制台需要后端 /api/v1/session；后端没起来、或者 Basic 门槛还没过，都会走到这里。',
+            hint: '控制台需要后端 /api/v1/session；后端没起来就会走到这里。',
             detail: describeError(err).detail,
             actions: [
               button('重试', {
@@ -408,7 +408,7 @@ function renderShell() {
     onClick: async () => {
       const ok = await confirmDialog({
         title: '登出控制台',
-        description: '登出会销毁服务器上的会话；Basic 门槛凭据仍然保留在浏览器里。',
+        description: '登出会销毁服务器上的会话，需要重新登录。',
         confirmText: '登出',
         danger: false,
       });

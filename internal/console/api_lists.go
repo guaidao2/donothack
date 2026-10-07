@@ -90,7 +90,7 @@ func (s *Server) handleExceptions(w http.ResponseWriter, r *http.Request) {
 		if !s.requireWrite(w, r) {
 			return
 		}
-		id := exceptionIDFromPath(r.URL.Path, s.mount, "/api/v1/exceptions")
+		id := exceptionIDFromPath(r.URL.Path, "", "/api/v1/exceptions")
 		if id == "" {
 			s.writeError(w, http.StatusBadRequest, "bad_request", "缺少例外 ID", "")
 			return
@@ -128,7 +128,7 @@ func (s *Server) handleExceptions(w http.ResponseWriter, r *http.Request) {
 		if !s.requireWrite(w, r) {
 			return
 		}
-		id := exceptionIDFromPath(r.URL.Path, s.mount, "/api/v1/exceptions")
+		id := exceptionIDFromPath(r.URL.Path, "", "/api/v1/exceptions")
 		if id == "" {
 			s.writeError(w, http.StatusBadRequest, "bad_request", "缺少例外 ID", "")
 			return
@@ -313,7 +313,7 @@ func (s *Server) handleIPLists(w http.ResponseWriter, r *http.Request) {
 		}
 		// 走 EscapedPath：CIDR 里的 "/" 会被 URL 编码成 %2F，
 		// 而 r.URL.Path 已经把它解码回 "/" 了，直接用会切错。
-		raw := strings.TrimPrefix(r.URL.EscapedPath(), s.mount+"/api/v1/ip-lists/")
+		raw := strings.TrimPrefix(r.URL.EscapedPath(), "/api/v1/ip-lists/")
 		value, err := url.PathUnescape(raw)
 		if err != nil {
 			s.writeError(w, http.StatusBadRequest, "bad_request", "路径里的条目无法解码", err.Error())

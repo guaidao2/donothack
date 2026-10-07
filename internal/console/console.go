@@ -22,7 +22,6 @@ import (
 	"math/big"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -64,24 +63,20 @@ type Server struct {
 	o Options
 
 	mux         *http.ServeMux
-	gate        *gateState
-	login       *gateState
-	totp        *gateState // **生效的** TOTP 密钥（与 gateState 同构：读写加锁）
-	totpPending *gateState // 待确认的密钥：生成它不影响生效状态
+	login       *hashState
+	totp        *hashState // **生效的** TOTP 密钥（与 login 同构：读写加锁）
+	totpPending *hashState // 待确认的密钥：生成它不影响生效状态
 	totpOn      atomic.Bool
 	assets      fs.FS
-	mount       string // 挂载前缀（gate.path_token 生效时非空）
 	session     *sessionStore
 	secret      []byte // CSRF 签名密钥
 
-	// 按配置生效的两道封禁（-02：原先 admin.max_login_fails /
-	// admin.lockout / gate.probe_ban_* 全是零引用，实际阈值来自数据面的
-	// ratelimit.ban_after_hits，而且 ratelimit 一关就完全失去次数控制）。
+	// 登录爆破防护：按 admin.max_login_fails / admin.lockout 生效
+	// （原先这几个配置项零引用，实际阈值来自数据面的 ratelimit，
+	// 而 ratelimit 一关就完全没有次数控制）。
 	loginThrottle *loginThrottle
-	probeThrottle *loginThrottle
 
 	csrfFails   atomic.Uint64
-	gateFails   atomic.Uint64
 	loginFails  atomic.Uint64
 	blockedReqs atomic.Uint64
 	logins      atomic.Uint64
@@ -98,18 +93,6 @@ func New(o Options) (*Server, string, error) {
 		return nil, "", fmt.Errorf("前端资源嵌入失败：%w", err)
 	}
 
-	mount := ""
-	if o.Config.Admin.Gate.Enabled && o.Config.Admin.Gate.PathToken != "" {
-		// **与轮换接口走同一套字符收敛**。
-		// mount 会被拼进 SPA 的 `<base href>`，直接信任配置值等于允许属性注入；
-		// 而 `..`、`?` 这类取值还会让 mux 注册期 panic（进程直接起不来）。
-		token := sanitizePathToken(o.Config.Admin.Gate.PathToken)
-		if token == "" {
-			return nil, "", fmt.Errorf("admin.gate.path_token 过滤后为空：只允许字母、数字、- 和 _")
-		}
-		mount = "/c/" + token
-	}
-
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
 		return nil, "", err
@@ -118,7 +101,6 @@ func New(o Options) (*Server, string, error) {
 	s := &Server{
 		o:       o,
 		assets:  assets,
-		mount:   mount,
 		session: newSessionStore(256),
 		secret:  secret,
 
@@ -126,9 +108,6 @@ func New(o Options) (*Server, string, error) {
 		// 阈值留空时给保守默认（5 次 / 5 分钟窗口 / 15 分钟封禁）。
 		loginThrottle: newLoginThrottle(o.Config.Admin.MaxLoginFails,
 			o.Config.Admin.Lockout.D(), o.Config.Admin.Lockout.D()),
-		// 门槛（Basic）探测：按 gate.probe_ban_after / probe_ban_window / probe_ban_duration 生效。
-		probeThrottle: newLoginThrottle(o.Config.Admin.Gate.ProbeBanAfter,
-			o.Config.Admin.Gate.ProbeBanWindow.D(), o.Config.Admin.Gate.ProbeBanDuration.D()),
 	}
 
 	// 初始密码：配置里没有 password_hash 时生成一个随机密码并返回。
@@ -147,58 +126,22 @@ func New(o Options) (*Server, string, error) {
 		loginHash = hash
 		initial = pw
 	}
-	s.login = &gateState{passwordHash: loginHash}
+	s.login = &hashState{passwordHash: loginHash}
 
 	// TOTP：配置里带密钥且开关打开才算启用。
 	// 只开开关不给密钥是**有意**判定为"未启用"的 —— 否则每个实例重启后
 	// 都拿着一把自己生成的密钥，而运维的认证器里那把就成了废码。
-	s.totp = &gateState{passwordHash: o.Config.Admin.TOTPSecret}
+	s.totp = &hashState{passwordHash: o.Config.Admin.TOTPSecret}
 	// 待确认密钥与生效密钥**分开存**：生成一把新密钥（enroll）不应该动生效状态，
 	// 否则"会话里点一次绑定"就等于把两步验证关掉了。
-	s.totpPending = &gateState{}
+	s.totpPending = &hashState{}
 	if o.Config.Admin.TOTPEnabled && strings.TrimSpace(o.Config.Admin.TOTPSecret) != "" {
 		s.totpOn.Store(true)
 	}
 
-	// 门槛凭据是**另一套**（可以单独轮换、可以交给运维同事）。
-	// 首次运行时若没配门槛凭据，就用同一个初始密码再哈希一次 ——
-	// 让运维只抄一个口令进门；之后可以各自轮换。
-	//
-	// 注意：**只有门槛真的启用时才需要它**。门槛关掉（gate.enabled: false
-	// 或 mode: none）却还强制要求门槛口令，会让"只想跑一个不带门槛的本地控制台"
-	// 直接起不来 —— 这是个实际踩到的启动失败。
-	gateHash := o.Config.Admin.Gate.PasswordHash
-	if gateNeeded(o.Config) {
-		if strings.TrimSpace(gateHash) == "" {
-			if initial == "" {
-				return nil, "", fmt.Errorf("启用门槛时必须配置 admin.gate.password_hash" +
-					"（或留空 admin.password_hash 让程序生成初始口令）")
-			}
-			h, err := hashPassword(initial)
-			if err != nil {
-				return nil, "", err
-			}
-			gateHash = h
-		}
-	}
-	s.gate = &gateState{passwordHash: gateHash}
-
 	s.routes()
 	return s, initial, nil
 }
-
-// gateNeeded 判断门槛是否真的启用。
-//
-// enabled 与 mode 都要看：mode=none 表示明确不要门槛（即便 enabled 为真）。
-func gateNeeded(cfg *config.Config) bool {
-	if !cfg.Admin.Gate.Enabled {
-		return false
-	}
-	return cfg.Admin.Gate.Mode != "none"
-}
-
-// Mount 返回控制台的挂载前缀。
-func (s *Server) Mount() string { return s.mount }
 
 // Addr 返回控制台的监听地址。
 func (s *Server) Addr() string { return s.o.Config.Admin.Addr }
@@ -215,7 +158,7 @@ func (s *Server) URL() string {
 	if s.tlsEnabled() {
 		scheme = "https"
 	}
-	return scheme + "://" + s.o.Config.Admin.Addr + s.mount + "/"
+	return scheme + "://" + s.o.Config.Admin.Addr + "/"
 }
 
 // ---------------------------------------------------------------- 路由
@@ -223,7 +166,7 @@ func (s *Server) URL() string {
 func (s *Server) routes() {
 	mux := http.NewServeMux()
 	h := func(p string, fn http.HandlerFunc) {
-		mux.HandleFunc(s.mount+p, fn)
+		mux.HandleFunc(p, fn)
 	}
 
 	// 认证
@@ -261,12 +204,6 @@ func (s *Server) routes() {
 	h("/api/v1/bans", s.handleBans)
 	h("/api/v1/bans/", s.handleBanByIP)
 
-	// 门槛
-	h("/api/v1/gate", s.handleGate)
-	h("/api/v1/gate/rotate", s.handleGateRotate)
-	h("/api/v1/gate/cert/selfsigned", s.handleGateCertSelfSigned)
-	h("/api/v1/gate/path/rotate", s.handleGatePathRotate)
-
 	// 例外与 IP 名单
 	h("/api/v1/exceptions", s.handleExceptions)
 	h("/api/v1/exceptions/", s.handleExceptions)
@@ -293,95 +230,44 @@ func (s *Server) routes() {
 	h("/api/v1/console-audit", s.handleConsoleAudit)
 
 	// 静态资源与 SPA 兜底
-	mux.HandleFunc(s.mount+"/", s.handleStatic)
+	mux.HandleFunc("/", s.handleStatic)
 
 	s.mux = mux
 }
 
 // Handler 返回带完整防护链的处理器。
 func (s *Server) Handler() http.Handler {
-	return s.gateMiddleware(s.mux)
+	return s.admissionMiddleware(s.mux)
 }
 
-// gateMiddleware 是第一层准入。
+// admissionMiddleware 是控制台唯一的准入层：**来源地址白名单**。
 //
-// 铁律：**未过门槛时，所有路径统一返回 401**，不区分路径是否存在。
-// 用 404 区分"路径不存在"会立刻暴露这是一个有内容的服务，
-// 扫描器据此就能把控制台从一堆端口里挑出来。
-func (s *Server) gateMiddleware(next http.Handler) http.Handler {
+// 认证不在这里：真正的边界是表单登录 + 会话（`/api/v1/login` 与 `requireWrite`）。
+// 曾经这里还有一层 HTTP Basic「门槛」，用来不让扫描器看见门 —— 已移除：
+// 它只提供"遮挡"不提供安全，却让运维多记一套凭据、还要面对浏览器反复弹窗，
+// 收益远小于代价。
+func (s *Server) admissionMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := s.clientIP(r)
-
-		// API token 可跳过门槛（CLI 用），但**仍然需要会话或 token 才能调 API**。
-		//
-		// 这里同时受 `admin.gate.exempt_api_token` 控制：
-		// 原先只要 token 对就一路免掉 IP 白名单、限速、探测封禁，
-		// 而那个配置项根本没人读 —— 运维以为关掉了，其实关不掉。
-		hasToken := s.tokenValid(r) && s.o.Config.Admin.Gate.ExemptAPIToken
-
-		// 允许来源限制（配置了才生效）
-		if !hasToken && !s.ipAllowed(ip) {
-			s.unauthorized(w, "来源地址不在允许列表内")
+		if !s.ipAllowed(ip) {
+			s.deny(w, "来源地址不在允许列表内")
 			return
-		}
-
-		// 探测封禁：门槛（Basic）失败次数过多直接封 IP。
-		//
-		// 阈值来自 `gate.probe_ban_after / probe_ban_window / probe_ban_duration`
-		// （-02：这三个字段原先零引用，实际用的是数据面的
-		// `ratelimit.ban_after_hits`，而那个一旦 enabled: false 就什么也不做 ——
-		// 控制台的爆破防护会静默消失）。
-		if !hasToken {
-			if ok, until := s.probeThrottle.allow(ip); !ok {
-				s.blockedReqs.Add(1)
-				w.Header().Set("Retry-After", strconv.Itoa(int(time.Until(until).Seconds())+1))
-				s.unauthorized(w, "尝试次数过多，已临时封禁")
-				return
-			}
-		}
-
-		if gateNeeded(s.o.Config) && !hasToken {
-			if !basicAuthOK(r, s.o.Config.Admin.Gate.Username, s.gate.passwordHash) {
-				s.gateFails.Add(1)
-				// 门槛失败计入封禁（与登录失败各自独立计数）
-				if banned, until := s.probeThrottle.fail(ip); banned {
-					recordAuth(authEvent{Action: "gate", OK: false, Remote: ip,
-						Detail: fmt.Sprintf("门槛失败次数过多，封禁至 %s", until.Format(time.RFC3339))})
-				}
-				s.unauthorized(w, "")
-				return
-			}
-			// 门槛通过 → 清掉该来源的失败计数
-			s.probeThrottle.success(ip)
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-// unauthorized 统一输出 401。
+// deny 统一输出 403。
 //
-// **不带 Server 头、不带产品特征**；realm 用中性串；响应体极简。
-func (s *Server) unauthorized(w http.ResponseWriter, detail string) {
-	realm := s.o.Config.Admin.Gate.Realm
-	if strings.TrimSpace(realm) == "" {
-		realm = defaultRealm
-	}
+// **不带 Server 头、不带产品特征**；响应体极简。
+func (s *Server) deny(w http.ResponseWriter, _ string) {
 	h := w.Header()
 	h.Del("Server")
-	// 用 Set 而不是直接写 map：Go 会规范化成 `Www-Authenticate` 上线，
-	// 这符合 RFC 7230（头名大小写不敏感），浏览器与 curl 都正常。
-	// 反过来"手工保留大写"会让 Header.Get 取不到这个头（Get 会再次规范化查询键），
-	// 给后续中间件埋坑 —— 一个纯外观问题不值得换这个坑。
-	h.Set("WWW-Authenticate", `Basic realm="`+realm+`", charset="UTF-8"`)
 	h.Set("Cache-Control", "no-store")
 	h.Set("Content-Type", "text/plain; charset=utf-8")
 	h.Set("X-Content-Type-Options", "nosniff")
-	w.WriteHeader(http.StatusUnauthorized)
-	if detail != "" {
-		_, _ = w.Write([]byte("401 Unauthorized\n"))
-		return
-	}
-	_, _ = w.Write([]byte("401 Unauthorized\n"))
+	w.WriteHeader(http.StatusForbidden)
+	_, _ = w.Write([]byte("403 Forbidden\n"))
 }
 
 func (s *Server) clientIP(r *http.Request) string {
@@ -463,8 +349,7 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "静态资源不支持写操作", "")
 		return
 	}
-	p := strings.TrimPrefix(r.URL.Path, s.mount)
-	p = strings.TrimPrefix(p, "/")
+	p := strings.TrimPrefix(r.URL.Path, "/")
 	if p == "" {
 		p = "index.html"
 	}
@@ -513,18 +398,13 @@ func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusInternalServerError, "index_missing", "前端外壳缺失", err.Error())
 		return
 	}
-	base := "/"
-	if s.mount != "" {
-		base = s.mount + "/"
-	}
-	html := string(data)
-	// 改写 <base href>：控制台挂在子路径下时，深链接才能找到 assets。
-	html = strings.Replace(html, `<base href="/"`, `<base href="`+base+`"`, 1)
-	// 同步改写前端用来算 API 前缀的 meta
-	html = rewriteMetaBase(html, base)
-
-	body := []byte(html)
-	etag := `"` + shortHash(body) + "-" + shortHash([]byte(base)) + `"`
+	// 控制台固定挂在根路径：index.html 里的 <base href="/"> 与 <meta name="dh-base">
+	// 本来就是对的，不需要在响应里改写。
+	//
+	// 以前这里会按挂载前缀改写它们，而 CSP 的 `base-uri 'none'` 会把改写结果拦下来
+	// （浏览器控制台每加载一次就报一条）—— 既然前缀已固定，干脆不改。
+	body := []byte(data)
+	etag := `"` + shortHash(body) + `"`
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "no-store")
 	if match := r.Header.Get("If-None-Match"); match != "" && strings.Contains(match, etag) {
@@ -546,34 +426,20 @@ func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request) {
 	//   - style-src 'self' 'unsafe-inline'：有少量元素级 style，禁掉会破坏布局；
 	//     样式注入的危害远小于脚本注入，这个折中是有意的；
 	//   - connect-src 'self'：只与自身 API 通信（含 SSE）；
-	//   - base-uri 'none' 尤其重要：本控制台会用 <base> 做挂载前缀，
-	//     若允许注入 <base> 就能改写所有相对 URL 的指向。
+	//   - base-uri 'self'：前端用 `<base href="/">` 决定"相对资源与路由相对谁"，
+	//     深层链接（直接打开 /events/42）就靠它。**不能用 'none'** ——
+	//     那会把 index.html 里的 <base> 一起拦掉（浏览器每次加载报一条 CSP 错），
+	//     深层链接下的 assets 会解析到 /events/assets/* 而白屏。
+	//     'self' 既放行同源 base，又挡住"注入一个外部 base 改写所有相对 URL"。
 	w.Header().Set("Content-Security-Policy",
 		"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "+
 			"img-src 'self' data:; connect-src 'self'; font-src 'self'; "+
-			"object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+			"object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'")
 	_, _ = w.Write(body)
 }
 
-// rewriteMetaBase 改写 <meta name="dh-base" content="...">。
-func rewriteMetaBase(html, base string) string {
-	const marker = `name="dh-base"`
-	i := strings.Index(html, marker)
-	if i < 0 {
-		return html
-	}
-	// 在同一标签内找 content="..."
-	start := strings.Index(html[i:], `content="`)
-	if start < 0 {
-		return html
-	}
-	start += i + len(`content="`)
-	end := strings.IndexByte(html[start:], '"')
-	if end < 0 {
-		return html
-	}
-	return html[:start] + base + html[start+end:]
-}
+// rewriteMetaBase 已随"固定根路径"一起移除：前端读的 <meta name="dh-base"> 就是 "/"，
+// 不需要在响应里改写（改写还会被 CSP 的 base-uri 'none' 拦下并报错）。
 
 // ---------------------------------------------------------------- TLS
 

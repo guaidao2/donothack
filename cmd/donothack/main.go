@@ -483,11 +483,8 @@ func run(cfgPath string, checkOnly, printBudget, noRules bool) error {
 			}
 		}()
 		log.Info("控制台已启动",
-			"addr", cfg.Admin.Addr, "mount", cs.Mount(),
-			"tls", cfg.Admin.TLS.Enabled, "gate", cfg.Admin.Gate.Enabled)
-		// 门槛是否真的启用：enabled 与 mode 都要看（mode=none 表示明确不要门槛）。
-		gateOn := cfg.Admin.Gate.Enabled && cfg.Admin.Gate.Mode != "none"
-		gateUser := firstNonEmpty(cfg.Admin.Gate.Username, "gate")
+			"addr", cfg.Admin.Addr,
+			"tls", cfg.Admin.TLS.Enabled)
 
 		if initialPW != "" {
 			// 初始口令只在这里打印一次，**不写进配置文件**（绝不使用默认口令）。
@@ -495,17 +492,6 @@ func run(cfgPath string, checkOnly, printBudget, noRules bool) error {
 				"username", firstNonEmpty(cfg.Admin.Username, "admin"),
 				"password", initialPW,
 				"login_url", cs.URL())
-			// 门槛用的是**另一套用户名**，必须单独印一行。
-			//
-			// 只印上面那行会把运维带沟里：浏览器弹的是 Basic 框，而上面写的用户名是
-			// admin（那是第二层登录页的用户名）。照着填只会一直 401，且没有任何
-			// 提示说该用 gate。这里把门槛那一行的用户名与同一个口令并排印出来。
-			if gateOn {
-				log.Warn("门槛凭据（HTTP Basic，仅本次启动有效）",
-					"username", gateUser,
-					"password", initialPW,
-					"note", "浏览器弹的 Basic 框填这一行；进页面后再用上面那行的用户名登录")
-			}
 		}
 	}
 
@@ -527,8 +513,7 @@ func runHashPasswordCmd(args []string) int {
 			fmt.Fprint(os.Stderr, `用法：donothack hash-password
 
 从标准输入读一行口令，把 pbkdf2-sha256 哈希打到标准输出，供写进
-config.yaml 的 admin.password_hash（控制台登录）或 admin.gate.password_hash
-（第一层 Basic 门槛，另一套凭据）。口令至少 12 位。
+config.yaml 的 admin.password_hash。口令至少 12 位。
 
 交互输入：
   donothack hash-password
@@ -908,7 +893,7 @@ func serveConsole(ctx context.Context, cs *console.Server, logger *audit.Logger)
 	// 控制台不做 TLS 时会有敏感凭据走明文，必须显式确认过才允许非本机绑定。
 	if tlsCfg == nil && !isLoopbackAddr(cs.Addr()) && !cs.AllowInsecure() {
 		return fmt.Errorf("控制台绑定在非本机地址 %s 但未启用 TLS；"+
-			"Basic 门槛凭据是 base64 不是加密，请启用 admin.tls 或显式设置 admin.allow_insecure: true", cs.Addr())
+			"登录表单会把口令明文发出去，请启用 admin.tls 或显式设置 admin.allow_insecure: true", cs.Addr())
 	}
 
 	errCh := make(chan error, 1)

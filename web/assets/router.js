@@ -1,6 +1,6 @@
 // web/assets/router.js
 // 职责：History API 路由 —— 路径匹配、参数与查询串解析、base 前缀、点击代理、订阅变更。
-// 说明：控制台可能挂在 gate.path_token 的随机前缀下，所有链接与导航都相对 base 生成。
+// 说明：控制台固定挂在根路径，所有链接与导航都相对 base 生成。
 
 function normalizeBase(base) {
   let b = typeof base === 'string' && base.length > 0 ? base : '/';
