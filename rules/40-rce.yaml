@@ -24,13 +24,22 @@ rules:
     score: 4
     message: "命令注入迹象：shell 特征字符与结构（containsShellChars）"
     tags: [rce, owasp-a03, cmdi, semantic]
+    # targets 里为什么要带 REQUEST_URI：
+    # 查询串会被按 `&` 切分成参数，裸分号 `?host=127.0.0.1;id` 切完就成两个值
+    # （`127.0.0.1` 与 `id`），单看任何一个值都看不到 `;id` 这个组合 ——
+    # 而**后端不一定这么切**（PHP/部分框架认 `;` 作分隔符，有些又不认）。
+    # 补上原始 URI 让规则能看到完整形态，避免"WAF 与后端切分方式不一致"的盲区。
     targets:
       - collection: ARGS
       - collection: REQUEST_BODY
+      - collection: REQUEST_URI
+    # **没有 compressWhitespace**（踩过的坑）：它把 `\n`、`\r` 折成空格，
+    # 而算子恰恰靠"分隔符 + 命令名"判断命令注入 —— 于是 `?host=127.0.0.1%0aid`
+    # 这种换行分隔的载荷在归一化阶段就被抹平、算子再也配不上（实测 0 分）。
+    # 算子自己会用 TrimLeft 跳过 `;` 后面的空格与 tab，不需要这道归一化。
     transforms:
       - urlDecode
       - urlDecode
-      - compressWhitespace
       - lowercase
     operator:
       name: containsShellChars
@@ -39,10 +48,20 @@ rules:
         - "; cat /etc/passwd"
         - "| whoami"
         - "$(id)"
+        # 换行分隔（作者报的漏检形态）：%0a 解码后就是真换行
+        - "127.0.0.1%0aid"
+        - "127.0.0.1\nid"
+        - "10.0.0.1%0acat /etc/passwd"
+        # 裸分号：靠 REQUEST_URI 那一份原始串命中
+        - "127.0.0.1;id"
       negative:
         - "Cats; dogs; and birds"
         - "the total is $5 (approx)"
         - "Please confirm; the team will follow up"
+        # 多行正常文本：换行后跟的是日常词，不是命令行
+        - "line1\ncat photos are cute"
+        - "note\nid card number is required"
+        - "intro\nsh photos from the party"
 
   - id: RCE-6002
     phase: 2

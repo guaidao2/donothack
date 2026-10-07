@@ -602,6 +602,43 @@ var shellCommands = []string{
 	"uname", "ifconfig", "ipconfig", "netstat", "ps", "tasklist", "systeminfo",
 }
 
+// shellArgFollows 判断命令名后面是不是"真的到了命令边界"，
+// 而不是命令名的一部分（`ls` 不能匹配 `lsass`、`id` 不能匹配 `identity`）。
+func shellArgFollows(after string) bool {
+	if after == "" {
+		return true
+	}
+	switch after[0] {
+	case ' ', '\t', '-', ';', '|', '&', '\n', '\r':
+		return true
+	}
+	return false
+}
+
+// looksLikeCommandLine 是**换行分隔**的额外收紧条件。
+//
+// 为什么只有换行需要它：`;`、`|`、`&&` 在正常文案里基本不出现，
+// 而换行到处都是 —— 一段多行文本里"某行以 cat/sh/id 开头"完全可能。
+// 所以换行后跟命令名时，还要看它像不像一条**命令**：
+// 命令到此为止，或者参数里有路径、选项、变量、重定向这类 shell 痕迹。
+func looksLikeCommandLine(after string) bool {
+	if after == "" {
+		return true
+	}
+	switch after[0] {
+	case ';', '|', '&':
+		return true
+	}
+	arg := strings.TrimLeft(after, " \t")
+	if arg == "" {
+		return true
+	}
+	if len(arg) > 200 {
+		arg = arg[:200]
+	}
+	return strings.ContainsAny(arg, "/-$`<>")
+}
+
 func (o shellCharsOp) Eval(_ *EvalCtx, in []byte) (Result, error) {
 	s := lowerASCII(in)
 	// $(...) 与反引号：内容非空即算（这是命令替换的形态本身）
@@ -614,20 +651,31 @@ func (o shellCharsOp) Eval(_ *EvalCtx, in []byte) (Result, error) {
 		return Result{Matched: true, Detail: "command substitution backtick"}, nil
 	}
 	// 分隔符 + 命令名
+	//
+	// `\n` / `\r` 单独收紧：它们确实是换行分隔的典型形态（`127.0.0.1\nid`），
+	// 但在**正常多行文本**里也会出现 —— 一行以 `cat photos are cute` 开头时，
+	// 光看"换行 + 命令名"就会误报。所以换行这种分隔符额外要求后面
+	// 要么命令到串尾，要么参数里带 shell 痕迹（路径/选项/变量/重定向）。
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if c != ';' && c != '|' && c != '&' && c != '\n' {
+		hardSep := c == ';' || c == '|' || c == '&'
+		newlineSep := c == '\n' || c == '\r'
+		if !hardSep && !newlineSep {
 			continue
 		}
 		rest := strings.TrimLeft(s[i+1:], " \t")
 		for _, cmd := range shellCommands {
-			if strings.HasPrefix(rest, cmd) {
-				after := rest[len(cmd):]
-				if after == "" || after[0] == ' ' || after[0] == '\t' || after[0] == '-' ||
-					after[0] == ';' || after[0] == '|' || after[0] == '&' {
-					return Result{Matched: true, Detail: "command after separator: " + cmd}, nil
-				}
+			if !strings.HasPrefix(rest, cmd) {
+				continue
 			}
+			after := rest[len(cmd):]
+			if !shellArgFollows(after) {
+				continue
+			}
+			if newlineSep && !looksLikeCommandLine(after) {
+				continue
+			}
+			return Result{Matched: true, Detail: "command after separator: " + cmd}, nil
 		}
 	}
 	// 重定向到路径

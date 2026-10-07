@@ -1,0 +1,7 @@
+POST /feedback HTTP/1.1
+Host: shop.example.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 68
+
+message=line1%0acat%20photos%20are%20cute%0aand%20id%20card%20needed

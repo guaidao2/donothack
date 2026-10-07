@@ -31,3 +31,9 @@ dist/donothack.exe test -r testdata/corpus/detect/sqli-single-quote-probe.http -
 > **为什么要专门有这一类**：WAF 的误报代价常常高于漏报。凡是"正常业务里
 > 长得一模一样"的弱信号（UA 指纹、单独引号、裸算术表达式），一律走
 > "记分但不单独立案" —— 它们能与其他信号叠加触发拦截，但不会自己把站封了。
+
+* `rce-newline-separator-weak.http` —— 换行分隔 + 裸命令名（`?host=127.0.0.1%0aid`），
+  4 分（`RCE-6001`）。理由：`\n` + 命令名是真实攻击形态（实测曾整条漏检 ——
+  规则链里的 compressWhitespace 把换行折成了空格），但"换行后跟一个词"在多行文本里
+  也可能出现，所以按弱信号处理：记分叠加，不单独立案。
+  带参数的形态（`%0acat /etc/passwd`）会叠上 `RCE-6003`，分数够高、照常拦。
