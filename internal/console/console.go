@@ -80,6 +80,9 @@ type Server struct {
 	loginFails  atomic.Uint64
 	blockedReqs atomic.Uint64
 	logins      atomic.Uint64
+
+	// 拦截页可视化预览的票据（短时效、有上限，见 api_blockpreview.go）
+	blockPreview *blockPreviewStore
 }
 
 // New 构造控制台。**会在 password_hash 为空时生成随机初始密码并返回它**，
@@ -99,10 +102,11 @@ func New(o Options) (*Server, string, error) {
 	}
 
 	s := &Server{
-		o:       o,
-		assets:  assets,
-		session: newSessionStore(256),
-		secret:  secret,
+		o:            o,
+		assets:       assets,
+		session:      newSessionStore(256),
+		secret:       secret,
+		blockPreview: newBlockPreviewStore(),
 
 		// 登录爆破：按 admin.max_login_fails / admin.lockout 生效。
 		// 阈值留空时给保守默认（5 次 / 5 分钟窗口 / 15 分钟封禁）。
@@ -207,6 +211,10 @@ func (s *Server) routes() {
 	// 拦截页（本次新增：内容可在控制台里改）
 	h("/api/v1/block-page", s.handleBlockPage)
 	h("/api/v1/block-page/preview", s.handleBlockPagePreview)
+	// 可视化预览：先换票据（POST，走写权限），再用 GET 取那份自带沙箱 CSP 的 HTML
+	// （iframe 只能发 GET、带不上 CSRF 头，所以必须拆成两步）。
+	h("/api/v1/block-page/preview/ticket", s.handleBlockPagePreviewTicket)
+	h("/api/v1/block-page/preview/", s.handleBlockPagePreviewRender)
 
 	// 限速与封禁
 	h("/api/v1/ratelimit", s.handleRateLimit)

@@ -282,6 +282,11 @@ export function backupUrl() {
   return url('/backup');
 }
 
+// blockPagePreviewUrl 指向"渲染好的拦截页"（自带沙箱 CSP），只给 iframe 内嵌用。
+export function blockPagePreviewUrl(token) {
+  return url('/block-page/preview/' + seg(token));
+}
+
 /** /api/v1 端点封装。所有页面都只通过这里取数。 */
 export const api = {
   /* 认证 */
@@ -338,6 +343,7 @@ export const api = {
   blockPage: () => request('/block-page'),
   putBlockPage: (body) => request('/block-page', { method: 'PUT', body: body }),
   previewBlockPage: (body) => request('/block-page/preview', { method: 'POST', body: body }),
+  blockPagePreviewTicket: (body) => request('/block-page/preview/ticket', { method: 'POST', body: body }),
 
   /* 配置 */
   config: () => request('/config'),

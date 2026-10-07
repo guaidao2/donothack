@@ -61,7 +61,12 @@ export const KEEP_OPEN = Symbol('keep-open');
 export function openDialog(spec = {}) {
   return new Promise((resolve) => {
     const modal = overlay();
-    const box = el('div', { class: 'modal__box' + (spec.wide ? ' modal__box--wide' : '') });
+    const box = el('div', {
+      class:
+        'modal__box' +
+        (spec.wide ? ' modal__box--wide' : '') +
+        (spec.xwide ? ' modal__box--xwide' : ''),
+    });
     const form = el('form', { attrs: { novalidate: 'novalidate' } });
 
     form.appendChild(el('div', { class: 'modal__head', text: spec.title || '' }));
@@ -177,6 +182,7 @@ export function alertDialog(spec = {}) {
     title: spec.title || '提示',
     description: spec.description,
     body: spec.body,
+    xwide: spec.xwide,
     submitText: spec.okText || '知道了',
     cancelText: '',
   }).then(() => undefined);

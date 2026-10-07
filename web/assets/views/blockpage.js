@@ -4,7 +4,7 @@
 // 重点：模板是 Go html/template（取值自动转义）；服务端在保存与启动时都拿样例渲染一次做校验，
 //       编译不过整次拒绝、旧模板继续生效。预览不产生任何状态变更。
 
-import { api, warningsOf } from '../api.js';
+import { api, warningsOf, blockPagePreviewUrl } from '../api.js';
 import {
   el,
   card,
@@ -111,21 +111,47 @@ export function render(container) {
     vm.preview = null;
     vm.previewError = null;
     paintActions();
+    const body = Object.assign({ html: currentHTML() }, SAMPLE);
     try {
-      const res = await api.previewBlockPage(
-        Object.assign({ html: currentHTML() }, SAMPLE)
-      );
+      const res = await api.previewBlockPage(body);
       vm.preview = String(pick(res, ['html', 'body', 'content'], '') || '');
       showWarnings(warningsOf(res));
+
+      // 可视化预览要另换一个短时效票据：iframe 只能发 GET、带不上 CSRF 头。
+      // 拿不到票据就退回源码预览 —— 预览这个动作不能因为一条通道失败而完全没反馈。
+      let frameUrl = '';
+      try {
+        const ticket = await api.blockPagePreviewTicket(body);
+        const token = String(pick(ticket, ['token'], '') || '');
+        if (token) frameUrl = blockPagePreviewUrl(token);
+      } catch (err) {
+        frameUrl = '';
+      }
+
       vm.busy = false;
       paint();
-      // 结果同时弹出来：页面很长，只更新最下面那张卡等于"点了没反应"。
       await alertDialog({
-        title: '预览：样例请求的渲染结果',
+        title: '预览：这一页长什么样',
         description:
           '样例请求 ' + SAMPLE.method + ' ' + SAMPLE.host + SAMPLE.path +
-          '（类目 ' + SAMPLE.category + '）。预览只渲染，不改任何状态。',
-        body: renderCode(vm.preview, { label: '渲染结果', meta: '服务端 html/template 输出' }),
+          '（类目 ' + SAMPLE.category + '）。沙箱渲染，模板里的脚本不会执行。',
+        xwide: true,
+        body: el(
+          'div',
+          { class: 'stack-2' },
+          frameUrl
+            ? el('iframe', {
+                class: 'preview-frame',
+                attrs: {
+                  src: frameUrl,
+                  sandbox: '',
+                  referrerpolicy: 'no-referrer',
+                  title: '拦截页预览',
+                },
+              })
+            : el('div', { class: 'sm muted', text: '可视化预览暂不可用，下面是渲染结果源码。' }),
+          renderCode(vm.preview, { label: '渲染结果源码', meta: '服务端 html/template 输出' })
+        ),
         okText: '关闭',
       });
     } catch (err) {

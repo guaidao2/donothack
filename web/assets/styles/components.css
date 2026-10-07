@@ -457,6 +457,20 @@
   max-width: 720px;
 }
 
+/* 更宽的一档：拦截页预览要按真实页面宽度看，窄了看不出布局 */
+.modal__box--xwide {
+  max-width: 1100px;
+}
+
+/* 沙箱里的拦截页预览：脚本不执行（服务端带 sandbox CSP，iframe 也带 sandbox 属性） */
+.preview-frame {
+  width: 100%;
+  height: 460px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+}
+
 .modal__head {
   padding: var(--sp-3) var(--sp-4);
   border-bottom: 1px solid var(--border);
