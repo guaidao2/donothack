@@ -363,14 +363,19 @@ type ConsoleTLSConfig struct {
 	AutoSelfSigned bool   `yaml:"auto_self_signed"`
 }
 
-// EventsConfig 是事件存储与查询上限。
+// EventsConfig 是控制台查事件的上限。
+//
+// **这里只有"查询上限"，没有"保留策略"** —— 因为事件存储（internal/eventstore）
+// 是纯内存的：ring buffer 存最近 N 条完整事件、1440 个分钟桶画 24 小时曲线，
+// 重启即失、不落盘。落盘与保留由 log.* 那套审计日志负责（按大小轮转、
+// 按份数与目录总配额删最旧的、磁盘水位兜底）。
+//
+// 曾经这里还写着 retention_days / retention_bytes / query_timeout / sqlite 四项，
+// 但全仓库没有一行代码读它们（事件不落盘，"按天保留"无从实现）——
+// 运维照着示例配置写 retention_days: 30 会以为事件留 30 天。已删除。
 type EventsConfig struct {
-	RetentionDays  int      `yaml:"retention_days"`
-	RetentionBytes Size     `yaml:"retention_bytes"`
-	MaxQueryRange  Duration `yaml:"max_query_range"`
-	MaxRows        int      `yaml:"max_rows"`
-	QueryTimeout   Duration `yaml:"query_timeout"`
-	SQLite         bool     `yaml:"sqlite"`
+	MaxQueryRange Duration `yaml:"max_query_range"`
+	MaxRows       int      `yaml:"max_rows"`
 }
 
 // AdminConfig 是控制台与控制面 API 配置。
@@ -509,11 +514,8 @@ func Default() *Config {
 			MaxLoginFails:      5,
 			Lockout:            Duration(15 * time.Minute),
 			Events: EventsConfig{
-				RetentionDays:  7,
-				RetentionBytes: Size(512 << 20),
-				MaxQueryRange:  Duration(24 * time.Hour),
-				MaxRows:        200,
-				QueryTimeout:   Duration(3 * time.Second),
+				MaxQueryRange: Duration(24 * time.Hour),
+				MaxRows:       200,
 			},
 		},
 		Alert: AlertConfig{Enabled: false},
@@ -555,17 +557,31 @@ func (c *Config) ApplyProfile(p profile.Params) {
 // 而他要做的动作其实很简单：把 admin.gate 整段删掉。
 func removedFieldHint(raw []byte) string {
 	var probe struct {
-		Admin map[string]any `yaml:"admin"`
+		Admin struct {
+			Gate   map[string]any `yaml:"gate"`
+			Events map[string]any `yaml:"events"`
+		} `yaml:"admin"`
 	}
 	if err := yaml.Unmarshal(raw, &probe); err != nil {
 		return ""
 	}
-	if _, ok := probe.Admin["gate"]; !ok {
-		return ""
+	if len(probe.Admin.Gate) > 0 {
+		return "admin.gate（HTTP Basic 门槛）已移除：认证只由表单登录 + 会话承担。\n" +
+			"  请把 admin 段落里的整个 gate: 块删掉（连同它下面缩进的所有行），然后重启。\n" +
+			"  想限制来源请用 admin.allow_ips；想细分登录爆破阈值用 admin.max_login_fails / admin.lockout。"
 	}
-	return "admin.gate（HTTP Basic 门槛）已移除：认证只由表单登录 + 会话承担。\n" +
-		"  请把 admin 段落里的整个 gate: 块删掉（连同它下面缩进的所有行），然后重启。\n" +
-		"  想限制来源请用 admin.allow_ips；想细分登录爆破阈值用 admin.max_login_fails / admin.lockout。"
+	// 事件存储是纯内存的，从来没有"按天保留"这回事 —— 这几个旋钮已被删除，
+	// 免得运维以为事件会留 7/30 天。
+	for _, dead := range []string{"retention_days", "retention_bytes", "query_timeout", "sqlite"} {
+		if _, ok := probe.Admin.Events[dead]; ok {
+			return "admin.events." + dead + " 已移除：控制台看的事件历史是**内存里的**" +
+				"（最近若干条 + 24 小时曲线），重启即失，不按天保留。\n" +
+				"  请把 admin.events 下的 retention_days / retention_bytes / query_timeout / sqlite 删掉" +
+				"（只留 max_query_range 与 max_rows），然后重启。\n" +
+				"  要长期留存攻击记录请配 log.* 那套审计日志（max_size_mb / max_backups / total_max_mb / min_free_mb）。"
+		}
+	}
+	return ""
 }
 
 // Load 读取并校验配置文件。默认值先铺好，YAML 里出现的字段覆盖之；

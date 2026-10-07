@@ -319,7 +319,8 @@ function configSection(host) {
     render: (payload) => {
       const blocks = [];
       const capture = pick(payload, ['log.capture_payload', 'capture_payload', 'logs.capture_payload'], null);
-      const retention = pick(payload, ['log.retention_days', 'log.retain_days', 'retention_days'], null);
+      // 这里**没有"保留天数"**：日志的保留是"份数 + 目录总配额"两条线，
+      // 没有按天保留这回事（以前这行读的是不存在的 log.retention_days，永远显示 "—"）。
       const maxSize = pick(payload, ['log.max_size_mb', 'log.maxsize_mb'], null);
       const backups = pick(payload, ['log.max_backups', 'log.backups'], null);
       const totalQuota = pick(payload, ['log.total_max_mb', 'log.total_quota_mb'], null);
@@ -332,7 +333,6 @@ function configSection(host) {
           sectionTitle('日志'),
           kvList(
             [
-              { k: '保留天数', v: retention === null ? null : coerceText(retention) + ' 天' },
               { k: '单文件上限', v: maxSize === null ? null : coerceText(maxSize) + ' MiB' },
               { k: '保留份数', v: backups === null ? null : coerceText(backups) },
               { k: '目录总配额', v: totalQuota === null ? null : coerceText(totalQuota) + ' MiB' },

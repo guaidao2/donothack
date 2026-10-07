@@ -158,13 +158,12 @@ admin:
   lockout: 15m
   pprof: false                   # 默认关，只在 127.0.0.1 可用
 
+  # 事件查询上限。**这里没有"保留天数"**：控制台看的事件历史是内存里的
+  # （最近若干条完整事件 + 24 小时曲线），重启即失、不落盘。
+  # 要长期留存就靠上面的 log.* 那套审计日志。
   events:
-    retention_days: 7
-    retention_bytes: 512MiB
     max_query_range: 24h         # 控制台单次查询最大时间范围
     max_rows: 200
-    query_timeout: 3s
-    sqlite: false                # 纯 Go SQLite 富查询，medium/small 默认关
 
 alert:
   enabled: false
