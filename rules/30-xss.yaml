@@ -95,6 +95,7 @@ rules:
     targets:
       - collection: ARGS
       - collection: REQUEST_BODY
+      - collection: REQUEST_URI
     transforms:
       - urlDecode
       - urlDecode
@@ -284,6 +285,7 @@ rules:
     targets:
       - collection: ARGS
       - collection: REQUEST_BODY
+      - collection: REQUEST_URI
     transforms:
       - urlDecode
       - urlDecode
@@ -394,3 +396,41 @@ rules:
         - "the expression of interest was approved"
         - "behavior: click the button to continue"
         - "The import of goods requires a customs declaration"
+
+  # 原型链污染：请求里出现 `__proto__` / `constructor.prototype` 这类键，
+  # 只有在"应用把参数合并进对象"时才可能被利用 —— 正常业务里几乎不出现，
+  # 但代码分享、调试类表单可能贴 JS 源码，所以给 4 分（记分叠加），不单独拦。
+  - id: XSS-5009
+    phase: 2
+    severity: high
+    category: xss
+    score: 4
+    message: "原型链污染特征：请求携带 __proto__ / constructor.prototype"
+    tags: [prototype-pollution, xss, owasp-a03]
+    targets:
+      - collection: ARGS
+      - collection: REQUEST_BODY
+      - collection: REQUEST_URI
+    transforms:
+      - urlDecode
+      - urlDecode
+      - lowercase
+    operator:
+      name: pm
+      params:
+        patterns:
+          - "__proto__"
+          - "constructor.prototype"
+          - "constructor[prototype]"
+          - "prototype[__proto__]"
+          - "__definegetter__"
+          - "__lookupgetter__"
+    test:
+      positive:
+        - "__proto__[isAdmin]=true"
+        - "{\"__proto__\":{\"polluted\":1}}"
+        - "constructor.prototype.polluted=1"
+      negative:
+        - "the prototype design is ready for review"
+        - "our constructor won the contract"
+        - "the property listing was updated"

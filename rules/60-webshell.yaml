@@ -53,6 +53,7 @@ rules:
     targets:
       - collection: ARGS
       - collection: REQUEST_BODY
+      - collection: REQUEST_URI
     transforms:
       - urlDecode
       - urlDecode

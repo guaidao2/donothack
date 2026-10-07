@@ -149,6 +149,7 @@ rules:
       - collection: REQUEST_URI
       - collection: REQUEST_PATH
       - collection: REQUEST_BODY
+      - collection: REQUEST_COOKIES
     # 这一条**必须**挂 normalizePath（与 7001/7002 正好相反）：
     # 它匹配的是"目标文件"，所以要把等价写法折叠成同一个形态 ——
     # `/etc//passwd`、`/etc/./passwd`、`/etc/x/../passwd`、`%2f` 编码斜杠，
@@ -268,12 +269,13 @@ rules:
     phase: 2
     severity: high
     category: lfi
-    score: 4
+    score: 5
     message: "路径穿越特征：回溯序列直接指向系统目录"
     tags: [lfi, owasp-a01, path-traversal]
     targets:
       - collection: ARGS
       - collection: REQUEST_BODY
+      - collection: REQUEST_COOKIES
       - collection: REQUEST_URI
     transforms:
       - urlDecode
@@ -299,9 +301,6 @@ rules:
           - "..\\windows\\"
           - "..\\winnt\\"
           - "..\\boot\\"
-          - "..%2fetc%2f"
-          - "..%2fproc%2f"
-          - "..%2fwindows%2f"
     test:
       positive:
         - "../../etc/passwd"

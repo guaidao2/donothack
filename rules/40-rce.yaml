@@ -153,6 +153,7 @@ rules:
     targets:
       - collection: ARGS
       - collection: REQUEST_BODY
+      - collection: REQUEST_URI
     # normalizePath 在这里的作用是折叠"重复斜杠 / 点段"这类等价写法：
     # `cmd //c whoami`、`whoami //all`、`rm -rf //`、`/etc//cron`、
     # `bitsadmin //transfer` —— 实测这些变体都能绕过纯字面量匹配。
@@ -162,7 +163,6 @@ rules:
     transforms:
       - urlDecode
       - urlDecode
-      - replaceComments
       - compressWhitespace
       - lowercase
       - normalizePath
@@ -229,6 +229,7 @@ rules:
     targets:
       - collection: ARGS
       - collection: REQUEST_BODY
+      - collection: REQUEST_URI
     # normalizePath 在这里的作用是折叠"重复斜杠 / 点段"这类等价写法：
     # `cmd //c whoami`、`whoami //all`、`rm -rf //`、`/etc//cron`、
     # `bitsadmin //transfer` —— 实测这些变体都能绕过纯字面量匹配。
@@ -238,7 +239,6 @@ rules:
     transforms:
       - urlDecode
       - urlDecode
-      - replaceComments
       - compressWhitespace
       - lowercase
       - normalizePath
@@ -290,6 +290,7 @@ rules:
     targets:
       - collection: ARGS
       - collection: REQUEST_BODY
+      - collection: REQUEST_URI
     # normalizePath 在这里的作用是折叠"重复斜杠 / 点段"这类等价写法：
     # `cmd //c whoami`、`whoami //all`、`rm -rf //`、`/etc//cron`、
     # `bitsadmin //transfer` —— 实测这些变体都能绕过纯字面量匹配。
@@ -299,7 +300,6 @@ rules:
     transforms:
       - urlDecode
       - urlDecode
-      - replaceComments
       - compressWhitespace
       - lowercase
       - normalizePath
@@ -351,6 +351,7 @@ rules:
     targets:
       - collection: ARGS
       - collection: REQUEST_BODY
+      - collection: REQUEST_URI
     transforms:
       - urlDecode
       - urlDecode
@@ -455,7 +456,6 @@ rules:
     transforms:
       - urlDecode
       - urlDecode
-      - replaceComments
       - compressWhitespace
       - lowercase
     operator:
@@ -594,12 +594,12 @@ rules:
     targets:
       - collection: ARGS
       - collection: REQUEST_BODY
+      - collection: REQUEST_COOKIES
       - collection: REQUEST_URI
       - collection: REQUEST_HEADERS
     transforms:
       - urlDecode
       - urlDecode
-      - replaceComments
       - compressWhitespace
       - lowercase
       - normalizePath
@@ -647,6 +647,48 @@ rules:
         - "openssl s_client -connect example.com:443"
         - "python -c 'print(1)' in a venv"
         - "ipconfig /all shows the adapter list"
+
+  # .NET 反序列化：请求里出现这些基类型名或 BinaryFormatter 魔数的 base64 头，
+  # 基本只可能是 ysoserial.net 打过来的 —— 出现即攻击。
+  - id: RCE-6014
+    phase: 2
+    severity: critical
+    category: rce
+    score: 5
+    message: "代码执行特征：.NET 反序列化载荷"
+    tags: [rce, deserialization, dotnet]
+    targets:
+      - collection: ARGS
+      - collection: REQUEST_BODY
+      - collection: REQUEST_URI
+      - collection: REQUEST_COOKIES
+    transforms:
+      - urlDecode
+      - urlDecode
+      - lowercase
+    operator:
+      name: pm
+      params:
+        patterns:
+          # BinaryFormatter 序列化魔数（00 01 00 00 00 FF FF FF FF）的 base64 头
+          - "aaeaaad"
+          - "objectstateformatter"
+          - "losformatter"
+          - "typeconfusedelegate"
+          - "textformattingrunproperties"
+          - "system.web.ui.objectstateformatter"
+          - "binaryformatter"
+          - "system.runtime.serialization"
+    test:
+      positive:
+        - "AAEAAAD/////AQAAAAAAAAAMAgAAAFRTeXN0ZW0uV2luZG93cy5Gb3JtcywgVmVyc2lvbj00LjAuMC4w"
+        - "ObjectStateFormatter"
+        - "TypeConfuseDelegate"
+        - "TextFormattingRunProperties"
+      negative:
+        - "the serializer handles JSON payloads"
+        - "please format the output as JSON"
+        - "our .NET service runs on Windows"
 
   - id: RCE-6012
     phase: 2
