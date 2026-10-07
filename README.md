@@ -325,7 +325,8 @@ block_page:
   title: "请求已被拦下"
 ```
 
-**不重启就生效**：以上几项都能在运行期原子替换，走 `GET/PUT /api/v1/block-page`
+**不重启就生效**：控制台「系统设置 → 拦截页」可以直接编辑模板、预览、保存、恢复内置；
+不想开界面就用 API —— 以上几项都能在运行期原子替换，走 `GET/PUT /api/v1/block-page`
 （`POST /api/v1/block-page/preview` 可以先渲染一份样例看效果）。PUT 的请求体：
 
 ```json

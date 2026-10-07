@@ -334,6 +334,11 @@ export const api = {
   bans: (params) => request('/bans', { query: params }),
   unban: (ip) => request('/bans/' + seg(ip), { method: 'DELETE' }),
 
+  /* 拦截页 */
+  blockPage: () => request('/block-page'),
+  putBlockPage: (body) => request('/block-page', { method: 'PUT', body: body }),
+  previewBlockPage: (body) => request('/block-page/preview', { method: 'POST', body: body }),
+
   /* 配置 */
   config: () => request('/config'),
   // 刻意没有 putConfig：后端**有意拒绝**整份写配置（大部分项改了必须重启，

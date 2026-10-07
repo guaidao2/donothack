@@ -29,6 +29,7 @@ import { render as renderRules } from './views/rules.js';
 import { render as renderRuleTest } from './views/ruletest.js';
 import { render as renderExceptions } from './views/exceptions.js';
 import { render as renderRatelimit } from './views/ratelimit.js';
+import { render as renderBlockPage } from './views/blockpage.js';
 import { render as renderSettings } from './views/settings.js';
 import { render as renderAudit } from './views/audit.js';
 
@@ -43,6 +44,7 @@ const ROUTES = [
   { path: '/ruletest', name: 'ruletest', title: '规则测试台', nav: '/ruletest', view: renderRuleTest },
   { path: '/exceptions', name: 'exceptions', title: '例外与白名单', nav: '/exceptions', view: renderExceptions },
   { path: '/ratelimit', name: 'ratelimit', title: 'CC 防护与限速', nav: '/ratelimit', view: renderRatelimit },
+  { path: '/blockpage', name: 'blockpage', title: '拦截页', nav: '/blockpage', view: renderBlockPage },
   { path: '/settings', name: 'settings', title: '系统设置', nav: '/settings', view: renderSettings },
   { path: '/audit', name: 'audit', title: '操作审计', nav: '/audit', view: renderAudit },
 ];
@@ -71,6 +73,7 @@ const NAV_GROUPS = [
     title: '系统',
     items: [
       { path: '/settings', label: '系统设置' },
+      { path: '/blockpage', label: '拦截页' },
       { path: '/audit', label: '操作审计' },
     ],
   },
